@@ -393,10 +393,10 @@
     const items = nt + nl;
     const note = $('#export-note');
     if (items > 0) {
-      const minutes = Math.max(1, Math.round((items * 0.75) / 60));
-      note.textContent = '보통 속도 기준으로 대략 ' + fmt(minutes) + '분 걸립니다. 요청 한도에 걸리면 자동으로 기다리므로 더 길어질 수 있습니다.';
+      const minutes = Math.max(1, Math.round((items * 5) / 60));
+      note.textContent = '보통 속도 기준으로 대략 ' + fmt(minutes) + '분 걸립니다(1건당 약 5초). X 오류 화면이 나오면 자동으로 기다리므로 더 길어질 수 있습니다.';
     } else {
-      note.textContent = bm ? '' : '정리할 항목을 2단계에서 선택해 주세요.';
+      note.textContent = '아카이브에서 고른 게시물·좋아요가 없습니다. 아카이브 없이 정리하려면 작업 파일 없이 4단계에서 실행기의 \u2018바로 정리\u2019를 쓰세요.';
     }
     const hasBackup = items > 0;
     $('#btn-backup-json').disabled = !hasBackup;
