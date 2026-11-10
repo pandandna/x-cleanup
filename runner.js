@@ -343,7 +343,7 @@
     let idle = 0; let acted = 0; let consec = []; let transient = 0; let reload = false;
     while (!S.stop) {
       if (S.paused) { await waitResume(); continue; }
-      if (RL.hit) { rlPause(); reload = true; continue; }
+      if (RL.hit) { await rlWait(); reload = true; continue; }
       if (reload) {
         // 한도 초과로 목록이 덜 불러와졌을 수 있으므로 화면을 다시 엽니다.
         reload = false;
@@ -378,7 +378,7 @@
         const before = seen.size;
         window.scrollBy(0, Math.round(window.innerHeight * 0.9));
         await sleep(1300);
-        if (RL.hit) { rlPause(); reload = true; idle = 0; continue; }
+        if (RL.hit) { await rlWait(); reload = true; idle = 0; continue; }
         const fresh = timelineArticles().some((a) => { const id = articleId(a); return id && !seen.has(id); });
         idle = fresh || seen.size !== before ? 0 : idle + 1;
         if (idle >= 6) break;
@@ -391,7 +391,7 @@
       RL.hit = null;
       try { r = await act(target, tid); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
       if (S.stop) break;
-      if (RL.hit && r.kind !== 'ok') { seen.delete(tid); rlPause(); reload = true; continue; }
+      if (RL.hit && r.kind !== 'ok') { seen.delete(tid); await rlWait(); reload = true; continue; }
       RL.hit = null;
       if (r.kind === 'ok') { S.stats.ok++; acted++; consec = []; transient = 0; }
       else if (r.kind === 'gone') { S.stats.gone++; consec = []; }
@@ -485,21 +485,50 @@
     render();
   }
 
-  // 요청 한도 초과: 알리고 자동으로 일시정지합니다. (진행 중이던 항목은 실패로 세지 않고, 재개하면 다시 시도합니다.)
-  function rlPause() {
+  // 요청 한도 초과: 알리고, 한도가 풀리는 예정 시각까지 기다린 뒤 자동으로 이어서 진행합니다.
+  // (진행 중이던 항목은 실패로 세지 않고 다시 시도합니다.)
+  const RL_DEFAULT_WAIT = 15 * 60000; // 해제 시각을 알 수 없을 때
+  const RL_BUFFER = 5000;             // 해제 시각 뒤 여유
+  const RL_MAX_REPEAT = 4;            // 성과 없이 연속으로 한도에 걸리면 일시정지
+  async function rlWait() {
     const h = RL.hit || RL.last;
     RL.hit = null;
     closeMenus();
     const cancel = document.querySelector('[data-testid="confirmationSheetCancel"]');
     if (cancel) { try { cancel.click(); } catch (e) { /* 무시 */ } }
-    const when = h && h.resetAt && h.resetAt > Date.now()
-      ? new Date(h.resetAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }) : null;
-    S.alert = 'X가 요청 한도 초과(429 Too Many Requests)를 알렸습니다. 자동으로 일시정지했습니다.\n'
-      + (when ? '한도는 ' + when + ' 무렵 풀릴 예정입니다. 그 이후에 ' : '보통 15분 정도 지나면 풀립니다. 잠시 기다린 뒤 ')
-      + '\'재개\'를 눌러 주세요. 속도를 \'안전\'으로 낮추는 것을 권장합니다.\n진행 중이던 항목은 실패로 세지 않았고, 재개하면 다시 시도합니다.';
-    try { console.warn('[X 정리 실행기] 요청 한도 초과(429)로 일시정지했습니다.' + (when ? ' ' + when + ' 이후 재개하세요.' : '')); } catch (e) { /* 무시 */ }
-    S.rlPauses = (S.rlPauses || 0) + 1;
-    pauseWith('요청 한도 초과(429)로 자동 일시정지' + (when ? ' — ' + when + ' 이후 재개 권장' : ' — 약 15분 뒤 재개 권장'));
+
+    S.rlRepeat = S.rlOkMark === S.stats.ok ? (S.rlRepeat || 0) + 1 : 1;
+    S.rlOkMark = S.stats.ok;
+    if (S.rlRepeat > RL_MAX_REPEAT) {
+      S.rlRepeat = 0;
+      S.alert = 'X가 요청 한도 초과(429)를 계속 알리고 있습니다. 기다렸다가 다시 시도해도 풀리지 않아 일시정지했습니다.\n시간을 넉넉히 두고(1시간 이상) \'재개\'를 눌러 주세요.';
+      pauseWith('요청 한도 초과(429)가 ' + RL_MAX_REPEAT + '번 연속 반복되어 일시정지');
+      return;
+    }
+
+    const known = !!(h && h.resetAt && h.resetAt > Date.now());
+    const ms = (known ? (h.resetAt - Date.now()) + RL_BUFFER : RL_DEFAULT_WAIT) * TS;
+    const until = new Date(Date.now() + ms);
+    const when = until.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+    const head = 'X가 요청 한도 초과(429 Too Many Requests)를 알렸습니다.\n'
+      + (known ? '한도가 풀리는 예정 시각(' + when + ')' : '해제 시각을 알 수 없어 약 15분 뒤(' + when + ')')
+      + '에 자동으로 이어서 진행합니다. 이 탭을 닫지 말고 그대로 두세요.\n진행 중이던 항목은 실패로 세지 않았고, 다시 시도합니다.';
+    try { console.warn('[X 정리 실행기] 요청 한도 초과(429). ' + when + '에 자동으로 재개합니다.'); } catch (e) { /* 무시 */ }
+    log('요청 한도 초과(429) — ' + when + '에 자동 재개 예정' + (known ? '' : ' (해제 시각 미확인, 15분 대기)'));
+    S.rlWaiting = true; S.rlSkip = false;
+    const end = Date.now() + ms;
+    while (Date.now() < end && !S.stop && !S.rlSkip) {
+      const left = Math.ceil((end - Date.now()) / 1000);
+      S.alert = head + '\n남은 시간: ' + (left >= 60 ? Math.floor(left / 60) + '분 ' : '') + (left % 60) + '초';
+      render();
+      await tick(Math.min(500, Math.max(1, end - Date.now())));
+    }
+    S.rlWaiting = false;
+    S.alert = '';
+    RL.hit = null;
+    if (!S.stop) log(S.rlSkip ? '대기를 건너뛰고 다시 시도합니다.' : '대기가 끝나 자동으로 이어서 진행합니다.');
+    S.rlSkip = false;
+    render();
   }
 
   async function transientWait() {
@@ -553,7 +582,7 @@
       RL.hit = null;
       try { r = await st.fn(id); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
       if (S.stop) return;
-      if (RL.hit && (!r || r.kind !== 'ok')) { rlPause(); continue; } // 같은 항목을 재개 후 다시 시도
+      if (RL.hit && (!r || r.kind !== 'ok')) { await rlWait(); continue; } // 같은 항목을 재개 후 다시 시도
       RL.hit = null;
       if (!r) continue;
 
@@ -632,7 +661,7 @@
     while (!S.stop) {
       if (S.paused) { await waitResume(); continue; }
       if (!BM_PATH_RE.test(location.pathname)) { await openBookmarks(); await tick(800); }
-      if (RL.hit) { rlPause(); continue; }
+      if (RL.hit) { await rlWait(); continue; }
       const b = document.querySelector('article [data-testid="removeBookmark"]');
       if (!b) {
         idle++;
@@ -645,7 +674,7 @@
       RL.hit = null;
       press(b);
       await waitFor(() => !b.isConnected || b.getAttribute('data-testid') !== 'removeBookmark' || null, 5000);
-      if (RL.hit && b.isConnected && b.getAttribute('data-testid') === 'removeBookmark') { rlPause(); continue; }
+      if (RL.hit && b.isConnected && b.getAttribute('data-testid') === 'removeBookmark') { await rlWait(); continue; }
       RL.hit = null;
       removed++;
       S.note = '북마크 ' + removed + '개 해제';
@@ -841,6 +870,10 @@
       display: 'none', whiteSpace: 'pre-line', background: '#3a2a05', color: '#ffd166', border: '1px solid #c99a1d', borderRadius: '8px', padding: '9px', fontWeight: '600',
     });
     ui.alert.setAttribute('role', 'alert');
+    ui.alertText = el('div');
+    ui.alertSkip = btn('기다리지 않고 지금 다시 시도', () => { S.rlSkip = true; }, 'neutral');
+    ui.alertSkip.style.marginTop = '8px';
+    ui.alert.appendChild(ui.alertText); ui.alert.appendChild(ui.alertSkip);
     body.appendChild(ui.alert);
 
     // 방식 선택
@@ -1027,7 +1060,8 @@
     if (!host) return;
     show(ui.hostWarn, !HOST_OK);
     show(ui.alert, !!S.alert);
-    ui.alert.textContent = S.alert || '';
+    ui.alertText.textContent = S.alert || '';
+    show(ui.alertSkip, !!S.rlWaiting);
     const direct = S.src === 'direct';
     const loaded = !!S.job;
     ui.src.disabled = S.running;
