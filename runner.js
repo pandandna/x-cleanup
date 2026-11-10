@@ -327,6 +327,11 @@
     if (a.querySelector('[data-testid="unretweet"]')) return (art) => undoRetweet(art);
     return null;
   }
+  // 프로필 '재게시' 탭: 재게시 취소만 합니다(내 글을 내가 재게시한 경우에도 원글은 지우지 않음).
+  function pickRepost(a) {
+    if (!dateOk(a) || !a.querySelector('[data-testid="unretweet"]')) return null;
+    return (art) => undoRetweet(art);
+  }
   function pickLike(a) {
     if (!dateOk(a) || !a.querySelector('[data-testid="unlike"]')) return null;
     return (art) => undoLike(art);
@@ -434,8 +439,10 @@
     if (S.direct.before) log('기준: ' + S.direct.before.toLocaleDateString('ko-KR') + ' 이전 게시물만');
     const d = S.direct;
     if (d.posts) {
-      await sweep({ key: 'tweets', label: '내 게시물·재게시', path: me, pick: pickMine });
+      await sweep({ key: 'tweets', label: '내 게시물', path: me, pick: pickMine });
       if (!S.stop) await sweep({ key: 'tweets', label: '내 답글', path: me + '/with_replies', pick: pickMine });
+      // X 프로필에서 재게시는 별도의 '재게시' 탭(/아이디/reposts)에 모여 있습니다.
+      if (!S.stop) await sweep({ key: 'tweets', label: '재게시', path: me + '/reposts', pick: pickRepost });
     }
     if (d.likes && !S.stop) await sweep({ key: 'likes', label: '좋아요', path: '/i/history/likes', pick: pickLike });
     if (d.bookmarks && !S.stop) await runBookmarksAll();
@@ -907,7 +914,7 @@
     });
     dateRow.appendChild(el('span', null, { text: '이 날짜 이전 것만' }));
     dateRow.appendChild(ui.dBefore);
-    dateRow.appendChild(el('span', { fontSize: '11px' }, { text: '(비우면 전부 · 좋아요는 게시물 작성일 기준 · 북마크는 해당 없음)' }));
+    dateRow.appendChild(el('span', { fontSize: '11px' }, { text: '(비우면 전부 · 재게시·좋아요는 원래 게시물 작성일 기준 · 북마크는 해당 없음)' }));
     ui.direct.appendChild(dateRow);
     body.appendChild(ui.direct);
 
