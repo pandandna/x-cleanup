@@ -9,6 +9,7 @@
     keepStale: false,    // true 면 이동 직후 이전 화면을 routeDelay 동안 그대로 둡니다
     routeDelay: 300,
     loggedIn: true,
+    batch: 4,
     log: [],
   };
 
@@ -26,10 +27,16 @@
   }
 
   function article(t, focal) {
-    const a = h('article', { 'data-testid': 'tweet', 'data-id': t.id });
+    const a = h('article', { 'data-testid': 'tweet', 'data-id': t.id, style: 'display:block;min-height:260px;border-bottom:1px solid #ccc' });
+    const dt = (t.date || '2024-01-01') + 'T00:00:00.000Z';
+    if (t.rtByMe && t.author !== DB.me && !focal) a.appendChild(h('div', { 'data-testid': 'socialContext' }, '내가 재게시함'));
     a.appendChild(h('div', { 'data-testid': 'User-Name' },
-      '<a href="/' + t.author + '">' + t.author + '</a> <a href="/' + t.author + '/status/' + t.id + '"><time datetime="2024-01-01T00:00:00.000Z">1월 1일</time></a>'));
+      '<a href="/' + t.author + '">' + t.author + '</a> <a href="/' + t.author + '/status/' + t.id + '"><time datetime="' + dt + '">' + dt.slice(0, 10) + '</time></a>'));
     a.appendChild(h('div', { 'data-testid': 'tweetText' }, t.text || ('글 ' + t.id)));
+    if (t.quote && DB.tweets[t.quote]) {
+      const q = DB.tweets[t.quote];
+      a.appendChild(h('div', { class: 'quote' }, '<div data-testid="User-Name"><a href="/' + q.author + '">' + q.author + '</a></div><div>' + (q.text || '인용') + '</div>'));
+    }
     const g = h('div', { role: 'group' });
     const caret = h('button', { 'data-testid': 'caret' }, '⋯');
     const like = h('button', { 'data-testid': t.liked ? 'unlike' : 'like' }, '♥');
@@ -100,7 +107,8 @@
       setTimeout(() => {
         t.deleted = true;
         DB.log.push('delete:' + t.id);
-        col.innerHTML = '<div>게시물을 삭제했습니다</div>';
+        if (/\/status\//.test(location.pathname)) col.innerHTML = '<div>게시물을 삭제했습니다</div>';
+        else document.querySelectorAll('article[data-id="' + t.id + '"]').forEach((x) => x.remove());
       }, 200);
     });
     no.addEventListener('click', () => d.remove());
@@ -136,12 +144,43 @@
       if (!DB.bookmarks.length) col.appendChild(h('div', {}, '나중을 위해 게시물 저장'));
       return;
     }
+    if (p === '/i/history/likes') {
+      col.innerHTML = '<div>마음에 들어요</div>';
+      const list = Object.values(DB.tweets).filter((t) => t.liked && !t.deleted).sort(byNewest);
+      return lazy(list.map((t) => () => article(t, false)));
+    }
+    if ((m = /^\/([^/]+)(\/with_replies)?\/?$/.exec(p)) && m[1].toLowerCase() === DB.me && p !== '/home') {
+      const replies = !!m[2];
+      col.innerHTML = '<div>프로필 ' + DB.me + (replies ? ' · 답글' : ' · 게시물') + '</div>';
+      const list = Object.values(DB.tweets).filter((t) => !t.deleted && !t.retweetOf && (
+        (t.author === DB.me && (replies || !t.replyTo)) || (t.rtByMe && t.author !== DB.me && !replies))).sort(byNewest);
+      const makers = [];
+      list.forEach((t) => {
+        if (replies && t.replyTo && DB.tweets[t.replyTo]) makers.push(() => article(DB.tweets[t.replyTo], false));
+        makers.push(() => article(t, false));
+      });
+      return lazy(makers);
+    }
     col.innerHTML = '<div>홈 타임라인</div>';
   }
+
+  const byNewest = (a, b) => ((b.date || '') + b.id).localeCompare((a.date || '') + a.id);
+  let pending = [];
+  function lazy(makers) {
+    pending = makers.slice();
+    more();
+  }
+  function more() {
+    pending.splice(0, DB.batch || 4).forEach((mk) => col.appendChild(mk()));
+  }
+  window.addEventListener('scroll', () => {
+    if (pending.length && window.innerHeight + window.scrollY >= document.body.scrollHeight - 300) setTimeout(more, 150);
+  });
 
   let timer = null;
   function onRoute() {
     closeMenu();
+    pending = [];
     if (!DB.keepStale) col.innerHTML = '<div role="progressbar">로딩</div>';
     clearTimeout(timer);
     timer = setTimeout(renderRoute, DB.routeDelay);

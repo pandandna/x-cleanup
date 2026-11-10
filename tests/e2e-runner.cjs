@@ -39,7 +39,7 @@ async function upload(page, job) {
 }
 const btn = (page, name) => page.getByRole('button', { name, exact: true });
 async function startConfirmed(page, speed) {
-  await page.locator('#xclean-runner-host select').selectOption(speed || 'fast');
+  await page.locator('#xclean-runner-host select').nth(1).selectOption(speed || 'fast');
   await btn(page, '시작').click();
   await waitPanel(page, /되돌릴 수 없습니다/);
   await btn(page, '되돌릴 수 없음을 이해했습니다. 시작').click();
@@ -73,8 +73,8 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
     window.DB.transientOnce = new Set(['103']);
   });
   await inject(page);
-  await waitPanel(page, /실행기 v2 준비됨/);
-  ok('실행기 v2 패널 표시');
+  await waitPanel(page, /실행기 v3 준비됨/);
+  ok('실행기 v3 패널 표시');
   await upload(page, mkJob('aaaaaaaaaaaa', ['900', '101', '102', '300', '400', '103'], ['501', '502', '503'], true));
   await startConfirmed(page, 'fast');
   await waitPanel(page, /완료: 삭제\/취소 8개, 이미 없음 4개, 실패 0개/, 90000);
@@ -162,6 +162,66 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   assert.deepEqual(await dbLog(page), ['delete:140', 'unlike:501', 'unbookmark:801', 'unbookmark:802']);
   ok('시험 실행 뒤 실제 실행은 처음부터 정상 처리');
 
+
+  /* ---- D. 바로 정리 (작업 파일 없이) */
+  const setupDirect = () => {
+    const T = (id, author, extra) => { window.DB.tweets[id] = Object.assign({ id, author }, extra || {}); };
+    T('3001', 'me', { date: '2024-03-01' }); T('3002', 'me', { date: '2023-06-01' }); T('3003', 'me', { date: '2022-01-01' });
+    T('3101', 'bob', { date: '2022-12-31' }); T('3004', 'me', { date: '2023-01-01', replyTo: '3101' });
+    T('3102', 'carol', { date: '2022-05-01', rtByMe: true, quote: '3001' }); // 내 글을 인용한 남의 글을 내가 재게시
+    T('3201', 'erin', { date: '2023-01-01', liked: true }); T('3202', 'erin', { date: '2025-01-01', liked: true });
+    for (let i = 10; i < 20; i++) T('34' + i, 'fran', { date: '2021-0' + ((i % 9) + 1) + '-01', liked: true });
+    T('3501', 'alice'); T('3502', 'alice'); window.DB.bookmarks = ['3501', '3502'];
+  };
+  const setDirect = async (posts, likes, bms, before) => {
+    const cb = (txt) => page.locator('#xclean-runner-host label', { hasText: txt }).first().locator('input');
+    await cb('내 게시물·답글 삭제')[posts ? 'check' : 'uncheck']();
+    await cb('좋아요 취소 (마음에')[likes ? 'check' : 'uncheck']();
+    await cb('북마크 전체 해제')[bms ? 'check' : 'uncheck']();
+    await page.locator('#xclean-runner-host input[type=date]').fill(before || '');
+  };
+
+  // D1. 전체
+  await openX(page, setupDirect, 'https://x.com/home');
+  await inject(page);
+  assert.equal(await page.locator('#xclean-runner-host select').first().inputValue(), 'direct');
+  await setDirect(true, true, true, '');
+  await startConfirmed(page, 'fast');
+  await waitPanel(page, /바로 정리 완료: 삭제\/취소 19개, 실패 0개/, 120000);
+  const logD1 = await dbLog(page);
+  assert.deepEqual(logD1.filter((x) => x.startsWith('delete:')).sort(), ['delete:3001', 'delete:3002', 'delete:3003', 'delete:3004']);
+  assert.deepEqual(logD1.filter((x) => x.startsWith('unretweet:')), ['unretweet:3102']);
+  assert.equal(logD1.filter((x) => x.startsWith('unlike:')).length, 12);
+  assert.deepEqual(logD1.filter((x) => x.startsWith('unbookmark:')).sort(), ['unbookmark:3501', 'unbookmark:3502']);
+  assert.ok(!logD1.includes('delete:3101') && !logD1.includes('delete:3102'));
+  ok('바로 정리: 프로필 게시물·답글 삭제, 재게시 취소, 좋아요 12개(스크롤로 추가 로딩) 취소, 북마크 해제');
+  ok('답글 화면의 남의 글, 내 글을 인용한 남의 글은 삭제하지 않음');
+
+  // D2. 날짜 기준
+  await openX(page, setupDirect, 'https://x.com/home');
+  await inject(page);
+  await setDirect(true, true, false, '2023-07-01');
+  await startConfirmed(page, 'fast');
+  await waitPanel(page, /바로 정리 완료: 삭제\/취소 \d+개, 실패 0개/, 120000);
+  const logD2 = await dbLog(page);
+  assert.deepEqual(logD2.filter((x) => x.startsWith('delete:')).sort(), ['delete:3002', 'delete:3003', 'delete:3004']);
+  assert.deepEqual(logD2.filter((x) => x.startsWith('unretweet:')), ['unretweet:3102']);
+  assert.ok(logD2.includes('unlike:3201') && !logD2.includes('unlike:3202'));
+  assert.equal(logD2.filter((x) => x.startsWith('unlike:')).length, 11);
+  assert.ok(!logD2.some((x) => x.startsWith('unbookmark:')));
+  ok('바로 정리 날짜 기준: 2023-07-01 이전 것만 처리, 이후 것과 북마크는 그대로');
+
+  // D3. 시험 실행
+  await openX(page, setupDirect, 'https://x.com/home');
+  await inject(page);
+  await setDirect(true, true, true, '');
+  await page.locator('#xclean-runner-host input[type=checkbox]').last().check();
+  await btn(page, '시험 실행').click();
+  await waitPanel(page, /시험 실행 완료: 처리 가능 \d+개, 실패 0개 \(실제로 지운 것은 없습니다\)/, 120000);
+  assert.deepEqual(await dbLog(page), []);
+  assert.equal(await page.evaluate(() => !document.getElementById('dlg') && Object.values(window.DB.tweets).every((t) => !t.deleted) && window.DB.bookmarks.length === 2), true);
+  ok('바로 정리 시험 실행: 실제 변경 0건');
+
   /* ---- 5. 북마크 백업 */
   await openX(page, () => {
     window.DB.tweets['701'] = { id: '701', author: 'alice', text: '북마크 글 701' };
@@ -193,8 +253,9 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   await inject(page);
   txt = await panelText(page);
   assert.match(txt, /x\.com 또는 twitter\.com 탭에서만/);
-  assert.equal(await page.evaluate(() => document.getElementById('xclean-runner-host').shadowRoot.querySelector('label').style.display), 'none');
-  ok('x.com 이 아닌 탭에서는 작업 파일 선택 숨김');
+  assert.equal(await page.evaluate(() => [...document.getElementById('xclean-runner-host').shadowRoot.querySelectorAll('label')].find((l) => /작업 파일\(\.json\) 선택/.test(l.textContent)).style.display), 'none');
+  assert.equal(await page.evaluate(() => [...document.getElementById('xclean-runner-host').shadowRoot.querySelectorAll('button')].find((b) => b.textContent === '시작').disabled), true);
+  ok('x.com 이 아닌 탭에서는 작업 파일 선택 숨김, 시작 불가');
 
   /* ---- 8. 중복 붙여넣기 / 닫기 */
   await openX(page, () => {});
