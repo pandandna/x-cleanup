@@ -1,4 +1,4 @@
-/*! X 정리 실행기 v2 (화면 조작 방식)
+/*! X 정리 실행기 v3 (화면 조작 방식)
  *
  *  x.com 에 로그인된 탭의 개발자 도구 콘솔에 붙여 넣어 실행합니다.
  *  - 사이트에서 만든 작업 파일(.json)을 읽어, X 화면의 버튼을 사람이 누르는 순서대로 자동으로 누릅니다.
@@ -14,7 +14,7 @@
     try { prev.destroy(); } catch (e) { /* 무시 */ }
   }
 
-  const VERSION = 2;
+  const VERSION = 3;
   const HOST_OK = /(^|\.)(x|twitter)\.com$/i.test(location.hostname);
 
   // 항목 사이 대기 시간(밀리초). 화면 이동·클릭 자체에도 1~3초가 걸립니다.
@@ -35,6 +35,9 @@
     speed: 'normal',
     dry: false,          // 시험 실행: 확인 창까지만 열고 취소
     stash: null,
+    src: 'direct',       // 'direct'(작업 파일 없이) | 'job'(작업 파일)
+    direct: { posts: true, likes: true, bookmarks: false, before: null },
+    lastDirect: '',
     progress: { tweets: 0, likes: 0, bookmarks: 0 },
     stats: { ok: 0, gone: 0, fail: 0 },
     failed: [],
@@ -168,8 +171,10 @@
   function isMine(art) {
     const me = myProfilePath();
     if (!me) return null; // 알 수 없음
-    const links = art.querySelectorAll('[data-testid="User-Name"] a[href]');
-    for (const l of links) if ((l.getAttribute('href') || '').toLowerCase() === me) return true;
+    // 인용된 게시물에도 작성자 칸이 있으므로, 맨 앞(바깥 게시물)의 작성자만 봅니다.
+    const box = art.querySelector('[data-testid="User-Name"]');
+    if (!box) return false;
+    for (const l of box.querySelectorAll('a[href]')) if ((l.getAttribute('href') || '').toLowerCase() === me) return true;
     return false;
   }
 
@@ -190,57 +195,40 @@
 
   /* ----------------------------------------------------------- 항목 처리 */
 
-  // 반환: {kind:'ok'|'gone'|'fail'|'transient', msg}
-  async function deleteTweet(id) {
-    const st = await openStatus(id);
-    if (!st || st.kind !== 'article') return st || { kind: 'fail', msg: '중지됨' };
-    const art = st.el;
-    const mine = isMine(art);
-
-    if (mine !== false) {
-      const caret = art.querySelector('[data-testid="caret"]');
-      if (caret) {
-        press(caret);
-        const item = await waitFor(() => (menuItems().length ? findDeleteItem() || 'none' : null), 5000);
-        if (item && item !== 'none') {
-          press(item);
-          const ok = await waitFor(() => document.querySelector('[data-testid="confirmationSheetConfirm"]'), 5000);
-          if (!ok) { closeMenus(); return { kind: 'fail', msg: '삭제 확인 창이 나타나지 않았습니다' }; }
-          if (S.dry) {
-            const cancel = document.querySelector('[data-testid="confirmationSheetCancel"]');
-            if (cancel) press(cancel); else closeMenus();
-            await waitFor(() => !document.querySelector('[data-testid="confirmationSheetConfirm"]') || null, 4000);
-            return { kind: 'ok', msg: '시험: 삭제 확인 창까지 확인' };
-          }
-          press(ok);
-          const done = await waitFor(() => !art.isConnected || !focalArticle(id) || null, 10000);
-          if (done) return { kind: 'ok' };
-          return { kind: 'fail', msg: '삭제 후에도 게시물이 남아 있습니다' };
-        }
-        closeMenus();
-        await tick(300);
-        if (mine === true) return { kind: 'fail', msg: '메뉴에서 \'삭제하기\'를 찾지 못했습니다' };
-      }
+  // ⋯ 메뉴 → 삭제하기 → 확인. 삭제 메뉴가 없으면 {kind:'nomenu'}
+  async function menuDelete(art, isGone) {
+    const caret = art.querySelector('[data-testid="caret"]');
+    if (!caret) return { kind: 'nomenu' };
+    press(caret);
+    const item = await waitFor(() => (menuItems().length ? findDeleteItem() || 'none' : null), 5000);
+    if (!item || item === 'none') { closeMenus(); await tick(300); return { kind: 'nomenu' }; }
+    press(item);
+    const ok = await waitFor(() => document.querySelector('[data-testid="confirmationSheetConfirm"]'), 5000);
+    if (!ok) { closeMenus(); return { kind: 'fail', msg: '삭제 확인 창이 나타나지 않았습니다' }; }
+    if (S.dry) {
+      const cancel = document.querySelector('[data-testid="confirmationSheetCancel"]');
+      if (cancel) press(cancel); else closeMenus();
+      await waitFor(() => !document.querySelector('[data-testid="confirmationSheetConfirm"]') || null, 4000);
+      return { kind: 'ok', msg: '시험: 삭제 확인 창까지 확인' };
     }
-
-    // 내 게시물이 아니면 리트윗(재게시) 기록입니다 → 재게시 취소
-    const un = art.querySelector('[data-testid="unretweet"]');
-    if (un) {
-      if (S.dry) return { kind: 'ok', msg: '시험: 재게시 취소 버튼 확인' };
-      press(un);
-      const c = await waitFor(() => document.querySelector('[data-testid="unretweetConfirm"]'), 5000);
-      if (!c) { closeMenus(); return { kind: 'fail', msg: '재게시 취소 메뉴가 나타나지 않았습니다' }; }
-      press(c);
-      const done = await waitFor(() => art.querySelector('[data-testid="retweet"]') || !art.isConnected, 8000);
-      return done ? { kind: 'ok' } : { kind: 'fail', msg: '재게시 취소가 확인되지 않았습니다' };
-    }
-    return { kind: 'gone', msg: '내 게시물이 아니거나 이미 재게시를 취소함' };
+    press(ok);
+    const done = await waitFor(() => isGone() || null, 10000);
+    return done ? { kind: 'ok' } : { kind: 'fail', msg: '삭제 후에도 게시물이 남아 있습니다' };
   }
 
-  async function unlikeTweet(id) {
-    const st = await openStatus(id);
-    if (!st || st.kind !== 'article') return st || { kind: 'fail', msg: '중지됨' };
-    const art = st.el;
+  async function undoRetweet(art) {
+    const un = art.querySelector('[data-testid="unretweet"]');
+    if (!un) return { kind: 'gone', msg: '재게시 상태가 아님' };
+    if (S.dry) return { kind: 'ok', msg: '시험: 재게시 취소 버튼 확인' };
+    press(un);
+    const c = await waitFor(() => document.querySelector('[data-testid="unretweetConfirm"]'), 5000);
+    if (!c) { closeMenus(); return { kind: 'fail', msg: '재게시 취소 메뉴가 나타나지 않았습니다' }; }
+    press(c);
+    const done = await waitFor(() => art.querySelector('[data-testid="retweet"]') || !art.isConnected, 8000);
+    return done ? { kind: 'ok' } : { kind: 'fail', msg: '재게시 취소가 확인되지 않았습니다' };
+  }
+
+  async function undoLike(art) {
     const un = art.querySelector('[data-testid="unlike"]');
     if (!un) {
       if (art.querySelector('[data-testid="like"]')) return { kind: 'gone', msg: '이미 좋아요가 취소됨' };
@@ -252,11 +240,164 @@
     return done ? { kind: 'ok' } : { kind: 'fail', msg: '좋아요 취소가 확인되지 않았습니다' };
   }
 
+  // 반환: {kind:'ok'|'gone'|'fail'|'transient', msg}
+  async function deleteTweet(id) {
+    const st = await openStatus(id);
+    if (!st || st.kind !== 'article') return st || { kind: 'fail', msg: '중지됨' };
+    const art = st.el;
+    const mine = isMine(art);
+    if (mine !== false) {
+      const r = await menuDelete(art, () => !art.isConnected || !focalArticle(id));
+      if (r.kind !== 'nomenu') return r;
+      if (mine === true) return { kind: 'fail', msg: '메뉴에서 \'삭제하기\'를 찾지 못했습니다' };
+    }
+    // 내 게시물이 아니면 재게시(리트윗) 기록입니다 → 재게시 취소
+    if (art.querySelector('[data-testid="unretweet"]')) return undoRetweet(art);
+    return { kind: 'gone', msg: '내 게시물이 아니거나 이미 재게시를 취소함' };
+  }
+
+  async function unlikeTweet(id) {
+    const st = await openStatus(id);
+    if (!st || st.kind !== 'article') return st || { kind: 'fail', msg: '중지됨' };
+    return undoLike(st.el);
+  }
+
+  /* ------------------------------------------- 바로 정리 (작업 파일 없이) */
+
+  const DRY_MAX = 3; // 시험 실행에서 단계마다 확인할 개수
+
+  function articleLink(a) {
+    return Array.from(a.querySelectorAll('a[href*="/status/"]')).find((x) => x.querySelector('time')) || null;
+  }
+  function articleId(a) { const l = articleLink(a); return l ? statusIdOf(l.getAttribute('href')) : null; }
+  function articleDate(a) {
+    const l = articleLink(a);
+    const t = l && l.querySelector('time');
+    const d = t ? new Date(t.getAttribute('datetime')) : null;
+    return d && !isNaN(d) ? d : null;
+  }
+  function dateOk(a) {
+    if (!S.direct.before) return true;
+    const d = articleDate(a);
+    return !!d && d < S.direct.before;
+  }
+  const timelineArticles = () => Array.from(document.querySelectorAll('[data-testid="primaryColumn"] article'));
+  const onTimeline = (id) => timelineArticles().some((x) => articleId(x) === id);
+
+  function pickMine(a) {
+    if (!dateOk(a)) return null;
+    if (isMine(a)) return (art, id) => menuDelete(art, () => !art.isConnected || !onTimeline(id)).then((r) => (r.kind === 'nomenu' ? { kind: 'fail', msg: '메뉴에서 \'삭제하기\'를 찾지 못했습니다' } : r));
+    if (a.querySelector('[data-testid="unretweet"]')) return (art) => undoRetweet(art);
+    return null;
+  }
+  function pickLike(a) {
+    if (!dateOk(a) || !a.querySelector('[data-testid="unlike"]')) return null;
+    return (art) => undoLike(art);
+  }
+
+  // 목록 화면을 위에서부터 훑으며 조건에 맞는 항목을 하나씩 처리합니다.
+  async function sweep(st) {
+    log(st.label + ' 정리 시작');
+    go(st.path);
+    await waitFor(() => location.pathname.toLowerCase() === st.path.toLowerCase() && (timelineArticles().length > 0 || primaryText().length > 40) || null, PAGE_TIMEOUT, 200);
+    await tick(1500);
+    window.scrollTo(0, 0);
+    const seen = new Set();
+    let idle = 0; let acted = 0; let consec = []; let transient = 0;
+    while (!S.stop) {
+      if (S.paused) { await waitResume(); continue; }
+      if (S.dry && acted >= DRY_MAX) break;
+
+      const err = document.querySelector('[data-testid="primaryColumn"] [data-testid="error-detail"]');
+      if (err && TRANSIENT_RE.test(err.innerText || '')) {
+        transient++;
+        if (transient > TRANSIENT_LIMIT) { pauseWith('X 오류 화면이 계속 나타납니다. 잠시(30분 이상) 쉬었다가 \'재개\'를 눌러 주세요.'); transient = 0; continue; }
+        S.transient = transient;
+        await transientWait();
+        go('/home'); await tick(800); go(st.path); await tick(2000);
+        continue;
+      }
+
+      let target = null; let act = null; let tid = null;
+      for (const a of timelineArticles()) {
+        const id = articleId(a);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const f = st.pick(a);
+        if (f) { target = a; act = f; tid = id; break; }
+      }
+      if (!target) {
+        const before = seen.size;
+        window.scrollBy(0, Math.round(window.innerHeight * 0.9));
+        await sleep(1300);
+        const fresh = timelineArticles().some((a) => { const id = articleId(a); return id && !seen.has(id); });
+        idle = fresh || seen.size !== before ? 0 : idle + 1;
+        if (idle >= 6) break;
+        continue;
+      }
+      idle = 0;
+      S.note = st.label + ' 처리 중: ' + tid;
+      render();
+      let r;
+      try { r = await act(target, tid); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
+      if (S.stop) break;
+      if (r.kind === 'ok') { S.stats.ok++; acted++; consec = []; transient = 0; }
+      else if (r.kind === 'gone') { S.stats.gone++; consec = []; }
+      else {
+        S.stats.fail++;
+        S.failed.push({ stage: st.key, id: tid, message: r.msg });
+        consec.push(tid);
+        log('실패 ' + tid + ': ' + r.msg);
+        if (consec.length >= FAIL_LIMIT) {
+          // 다시 시도할 수 있게 되돌립니다.
+          consec.forEach((x) => seen.delete(x));
+          S.stats.fail -= consec.length;
+          S.failed.splice(S.failed.length - consec.length, consec.length);
+          consec = [];
+          window.scrollTo(0, 0);
+          pauseWith('연속 ' + FAIL_LIMIT + '회 실패했습니다 (마지막: ' + r.msg + '). X 화면을 확인하고 \'재개\'를 눌러 주세요.');
+          continue;
+        }
+      }
+      render();
+      await sleep(randDelay());
+    }
+    S.note = '';
+    log(st.label + ' 정리 끝' + (S.dry ? ' (시험)' : '') + ': ' + acted + '개');
+  }
+
+  async function startDirect() {
+    S.mode = 'direct';
+    S.running = true; S.paused = false; S.stop = false; S.confirming = false;
+    S.stash = { progress: S.progress, stats: S.stats, failed: S.failed };
+    S.progress = { tweets: 0, likes: 0, bookmarks: 0 };
+    S.stats = { ok: 0, gone: 0, fail: 0 };
+    S.failed = [];
+    render();
+    const me = myProfilePath();
+    if (!me) { finish('중단: 로그인된 X 화면이 아닙니다. 로그인 후 다시 실행해 주세요.'); return; }
+    if (document.hidden) log('주의: 이 탭이 화면에 보이지 않으면 브라우저가 속도를 크게 늦춥니다. 이 탭을 띄워 두세요.');
+    if (S.dry) log('시험 실행: 단계마다 ' + DRY_MAX + '개까지만 확인하고, 실제로 지우지 않습니다.');
+    if (S.direct.before) log('기준: ' + S.direct.before.toLocaleDateString('ko-KR') + ' 이전 게시물만');
+    const d = S.direct;
+    if (d.posts) {
+      await sweep({ key: 'tweets', label: '내 게시물·재게시', path: me, pick: pickMine });
+      if (!S.stop) await sweep({ key: 'tweets', label: '내 답글', path: me + '/with_replies', pick: pickMine });
+    }
+    if (d.likes && !S.stop) await sweep({ key: 'likes', label: '좋아요', path: '/i/history/likes', pick: pickLike });
+    if (d.bookmarks && !S.stop) await runBookmarksAll();
+    const r = S.stats;
+    S.lastDirect = (S.dry ? '시험 결과: 처리 가능 ' : '결과: 삭제/취소 ') + r.ok + '개, 실패 ' + r.fail + '개';
+    if (S.stop) finish('중지했습니다. 다시 시작하면 남은 항목을 처음부터 다시 훑습니다.');
+    else if (S.dry) finish('시험 실행 완료: 처리 가능 ' + r.ok + '개, 실패 ' + r.fail + '개 (실제로 지운 것은 없습니다)');
+    else finish('바로 정리 완료: 삭제/취소 ' + r.ok + '개, 실패 ' + r.fail + '개');
+  }
+
   /* ------------------------------------------------------------- 진행/저장 */
 
   const storeKey = () => 'xclean:v2:' + (S.job ? S.job.id : 'none');
   function persist() {
-    if (S.dry) return; // 시험 실행은 진행 기록에 남기지 않습니다
+    if (S.dry || S.mode === 'direct') return; // 시험 실행·바로 정리는 진행 기록에 남기지 않습니다
     try {
       localStorage.setItem(storeKey(), JSON.stringify({ progress: S.progress, stats: S.stats, failed: S.failed.slice(-2000) }));
     } catch (e) { /* 저장소를 못 쓰면 이어하기만 불가 */ }
@@ -477,14 +618,16 @@
   }
 
   function finish(msg) {
+    const wasDirect = S.mode === 'direct';
     S.running = false; S.paused = false; S.mode = null; S.note = '';
-    persist();
     log(msg);
     if (S.stash) {
-      // 시험 실행 결과는 기록에 남기고, 실제 진행 상황은 원래대로 되돌립니다.
-      if (S.dry) S.failed.forEach((f) => log('시험 실패 ' + f.id + ': ' + f.message));
+      // 시험 실행·바로 정리 결과는 기록에만 남기고, 작업 파일 진행 상황은 원래대로 되돌립니다.
+      if (S.dry || wasDirect) S.failed.slice(0, 20).forEach((f) => log((S.dry ? '시험 실패 ' : '실패 ') + f.id + ': ' + f.message));
+      if (wasDirect && !S.dry && S.failed.length) S.directFailed = S.failed.slice();
       S.progress = S.stash.progress; S.stats = S.stash.stats; S.failed = S.stash.failed; S.stash = null;
     }
+    if (!wasDirect) persist();
     render();
   }
 
@@ -616,6 +759,41 @@
     ui.hostWarn = el('div', { color: '#ff7b72', display: 'none' }, { text: 'x.com 또는 twitter.com 탭에서만 사용할 수 있습니다.' });
     body.appendChild(ui.hostWarn);
 
+    // 방식 선택
+    ui.srcRow = el('div', { display: 'flex', alignItems: 'center', gap: '8px' });
+    ui.srcRow.appendChild(el('span', null, { text: '방식' }));
+    ui.src = el('select', { flex: '1', background: '#16202a', color: '#e7e9ea', border: '1px solid #38444d', borderRadius: '6px', padding: '5px', font: 'inherit' });
+    ui.src.appendChild(el('option', null, { value: 'direct', text: '바로 정리 (아카이브 없이)' }));
+    ui.src.appendChild(el('option', null, { value: 'job', text: '작업 파일로 정리 (아카이브에서 고른 항목)' }));
+    ui.src.value = S.src;
+    ui.src.addEventListener('change', () => { S.src = ui.src.value; S.confirming = false; render(); });
+    ui.srcRow.appendChild(ui.src);
+    body.appendChild(ui.srcRow);
+
+    // 바로 정리 옵션
+    ui.direct = el('div', { display: 'flex', flexDirection: 'column', gap: '4px', border: '1px solid #26323c', borderRadius: '8px', padding: '8px' });
+    const dmk = (key, label) => {
+      const cb = el('input', { margin: '0 6px 0 0' }, { type: 'checkbox', checked: S.direct[key] });
+      cb.addEventListener('change', () => { S.direct[key] = cb.checked; render(); });
+      ui.direct.appendChild(el('label', { display: 'flex', alignItems: 'center' }, null, [cb, el('span', null, { text: label })]));
+      return cb;
+    };
+    ui.dPosts = dmk('posts', '내 게시물·답글 삭제, 재게시 취소 (프로필 화면)');
+    ui.dLikes = dmk('likes', '좋아요 취소 (마음에 들어요 목록)');
+    ui.dBms = dmk('bookmarks', '북마크 전체 해제');
+    const dateRow = el('label', { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', color: '#9ba7b0' });
+    ui.dBefore = el('input', { background: '#16202a', color: '#e7e9ea', border: '1px solid #38444d', borderRadius: '6px', padding: '3px 5px', font: 'inherit', colorScheme: 'dark' }, { type: 'date' });
+    ui.dBefore.addEventListener('change', () => {
+      const v = ui.dBefore.value;
+      S.direct.before = v ? new Date(v + 'T00:00:00') : null;
+      render();
+    });
+    dateRow.appendChild(el('span', null, { text: '이 날짜 이전 것만' }));
+    dateRow.appendChild(ui.dBefore);
+    dateRow.appendChild(el('span', { fontSize: '11px' }, { text: '(비우면 전부 · 좋아요는 게시물 작성일 기준 · 북마크는 해당 없음)' }));
+    ui.direct.appendChild(dateRow);
+    body.appendChild(ui.direct);
+
     ui.fileInput = el('input', { display: 'none' }, { type: 'file', accept: '.json,application/json' });
     const pick = el('label', {
       display: 'block', textAlign: 'center', padding: '9px', border: '1px dashed #536471', borderRadius: '8px', cursor: 'pointer', color: '#8ecdf8',
@@ -655,7 +833,7 @@
     ui.confirmText = el('div', { marginBottom: '8px', whiteSpace: 'pre-line' });
     ui.confirm.appendChild(ui.confirmText);
     const cRow = el('div', { display: 'flex', gap: '6px' });
-    ui.confirmYes = btn('되돌릴 수 없음을 이해했습니다. 시작', () => startDelete(), 'danger');
+    ui.confirmYes = btn('되돌릴 수 없음을 이해했습니다. 시작', () => (S.src === 'direct' ? startDirect() : startDelete()), 'danger');
     ui.confirmNo = btn('취소', () => { S.confirming = false; render(); }, 'neutral');
     cRow.appendChild(ui.confirmYes); cRow.appendChild(ui.confirmNo);
     ui.confirm.appendChild(cRow);
@@ -677,7 +855,7 @@
     ui.extra = el('div', { display: 'flex', gap: '6px', flexWrap: 'wrap' });
     ui.bmBackup = btn('북마크 백업', () => backupBookmarks(), 'neutral');
     ui.failSave = btn('실패 목록 저장', () => {
-      download('xclean-failed-' + stamp() + '.json', 'application/json', JSON.stringify(S.failed, null, 2));
+      download('xclean-failed-' + stamp() + '.json', 'application/json', JSON.stringify(S.src === 'direct' ? (S.directFailed || []) : S.failed, null, 2));
     }, 'neutral');
     ui.resetProg = btn('진행 기록 지우기', () => { if (!S.running) { clearProgress(); log('진행 기록을 지웠습니다.'); render(); } }, 'neutral');
     ui.extra.appendChild(ui.bmBackup); ui.extra.appendChild(ui.failSave); ui.extra.appendChild(ui.resetProg);
@@ -688,7 +866,16 @@
   }
 
   function onStartClick() {
-    if (!S.job || S.running) return;
+    if (S.running) return;
+    if (S.src === 'direct') {
+      const d = S.direct;
+      if (!d.posts && !d.likes && !d.bookmarks) { log('정리할 항목을 하나 이상 체크해 주세요.'); return; }
+      if (S.dry) { startDirect(); return; }
+      S.confirming = true;
+      render();
+      return;
+    }
+    if (!S.job) return;
     if (totalWork() === 0) { log('실행할 항목이 없습니다. 항목을 선택해 주세요.'); return; }
     if (S.dry) { startDelete(); return; }
     if (doneWork() >= totalWork()) { log('이미 완료된 작업입니다. 다시 하려면 \'진행 기록 지우기\'를 누르세요.'); return; }
@@ -696,7 +883,7 @@
     render();
   }
   function onPauseClick() {
-    if (!S.running || S.mode !== 'delete') return;
+    if (!S.running || (S.mode !== 'delete' && S.mode !== 'direct')) return;
     S.paused = !S.paused;
     log(S.paused ? '일시정지' : '재개');
     render();
@@ -709,12 +896,17 @@
     try {
       const job = validateJob(JSON.parse(await f.text()));
       S.job = job;
+      S.src = 'job';
+      if (ui.src) ui.src.value = 'job';
       S.include = { tweets: job.tweets.length > 0, likes: job.likes.length > 0, bookmarks: job.bookmarksAll };
       S.progress = { tweets: 0, likes: 0, bookmarks: 0 };
       S.stats = { ok: 0, gone: 0, fail: 0 };
       S.failed = [];
       const resumed = restore();
       log('작업 파일을 불러왔습니다' + (resumed ? ' (이전 진행 기록을 이어받았습니다)' : '') + '.');
+      if (!job.tweets.length && !job.likes.length) {
+        log('주의: 이 작업 파일에는 지울 게시물·좋아요가 0개입니다. 아카이브(zip)를 올리지 않고 만든 파일일 수 있습니다. 아카이브 없이 지우려면 위의 방식에서 \'바로 정리\'를 고르세요.');
+      }
       buildOpts();
     } catch (e) {
       S.job = null;
@@ -749,11 +941,16 @@
   function render() {
     if (!host) return;
     show(ui.hostWarn, !HOST_OK);
-    show(ui.pick, HOST_OK && !S.running, 'block');
+    const direct = S.src === 'direct';
     const loaded = !!S.job;
-    show(ui.opts, loaded, 'flex');
-    show(ui.speedRow, loaded, 'flex');
-    show(ui.dryRow, loaded, 'flex');
+    ui.src.disabled = S.running;
+    show(ui.direct, direct, 'flex');
+    [ui.dPosts, ui.dLikes, ui.dBms, ui.dBefore].forEach((x) => { x.disabled = S.running; });
+    show(ui.pick, HOST_OK && !S.running && !direct, 'block');
+    show(ui.summary, !direct);
+    show(ui.opts, loaded && !direct, 'flex');
+    show(ui.speedRow, loaded || direct, 'flex');
+    show(ui.dryRow, loaded || direct, 'flex');
     ui.dry.disabled = S.running;
     ui.start.textContent = S.dry ? '시험 실행' : '시작';
 
@@ -769,21 +966,33 @@
     const pct = total ? Math.round((done / total) * 100) : 0;
     ui.bar.style.width = pct + '%';
     let t = '';
-    if (loaded) {
+    if (direct) {
+      if (S.running && S.mode === 'direct') t = (S.dry ? '처리 가능 ' : '삭제/취소 ') + fmt(S.stats.ok) + '  ·  실패 ' + fmt(S.stats.fail);
+      else t = S.lastDirect || '';
+    } else if (loaded) {
       t = fmt(done) + ' / ' + fmt(total) + ' (' + pct + '%)  ·  ' + (S.dry && S.stash ? '처리 가능 ' : '삭제/취소 ') + fmt(S.stats.ok) + '  ·  이미 없음 ' + fmt(S.stats.gone) + '  ·  실패 ' + fmt(S.stats.fail);
     }
     if (S.note) t = (t ? t + '\n' : '') + S.note;
     ui.progressText.style.whiteSpace = 'pre-line';
     ui.progressText.textContent = t;
-    show(ui.barWrap, loaded);
+    show(ui.barWrap, loaded && !direct);
 
     const busy = S.running;
-    setEnabled(ui.start, HOST_OK && loaded && !busy && !S.confirming && total > 0);
-    setEnabled(ui.pause, busy && S.mode === 'delete');
+    const anyDirect = S.direct.posts || S.direct.likes || S.direct.bookmarks;
+    setEnabled(ui.start, HOST_OK && !busy && !S.confirming && (direct ? anyDirect : (loaded && total > 0)));
+    setEnabled(ui.pause, busy && (S.mode === 'delete' || S.mode === 'direct'));
     ui.pause.textContent = S.paused ? '재개' : '일시정지';
     setEnabled(ui.stopBtn, busy);
     show(ui.confirm, S.confirming && !busy);
-    if (S.confirming) {
+    if (S.confirming && direct) {
+      const d = S.direct;
+      const parts = [];
+      const when = d.before ? ' (' + d.before.toLocaleDateString('ko-KR') + ' 이전 것만)' : ' (전부)';
+      if (d.posts) parts.push('내 게시물·답글 삭제, 재게시 취소' + when);
+      if (d.likes) parts.push('좋아요 취소' + when);
+      if (d.bookmarks) parts.push('북마크 전체 해제');
+      ui.confirmText.textContent = parts.join('\n') + '\n\n삭제는 되돌릴 수 없습니다. 고정된 게시물도 포함됩니다.\n실행 중에는 이 탭을 새로고침하거나 닫지 말고, 화면에 띄워 두세요.\n(실행기가 프로필·좋아요·북마크 화면을 스크롤하며 버튼을 누릅니다.)';
+    } else if (S.confirming) {
       const parts = [];
       if (S.include.tweets && S.job.tweets.length) parts.push('게시물·답글 ' + fmt(S.job.tweets.length - Math.min(S.progress.tweets, S.job.tweets.length)) + '개 삭제');
       if (S.include.likes && S.job.likes.length) parts.push('좋아요 ' + fmt(S.job.likes.length - Math.min(S.progress.likes, S.job.likes.length)) + '개 취소');
@@ -791,8 +1000,8 @@
       ui.confirmText.textContent = parts.join('\n') + '\n\n삭제는 되돌릴 수 없습니다. 백업을 받으셨는지 확인해 주세요.\n실행 중에는 이 탭을 새로고침하거나 닫지 말고, 화면에 띄워 두세요.\n(실행기가 X 화면을 자동으로 이동하며 버튼을 누릅니다.)';
     }
     setEnabled(ui.bmBackup, HOST_OK && !busy);
-    show(ui.failSave, S.failed.length > 0);
-    show(ui.resetProg, loaded && !busy && (done > 0 || S.stats.fail > 0));
+    show(ui.failSave, S.src === 'direct' ? !!(S.directFailed && S.directFailed.length) : S.failed.length > 0);
+    show(ui.resetProg, !direct && loaded && !busy && (done > 0 || S.stats.fail > 0));
   }
 
   /* ------------------------------------------------------------ 시작/종료 */
@@ -808,5 +1017,5 @@
   buildUi();
   if (!HOST_OK) log('이 탭(' + location.hostname + ')에서는 실행할 수 없습니다.');
   render();
-  log('실행기 v' + VERSION + ' 준비됨 (화면 조작 방식). 작업 파일을 선택해 주세요.');
+  log('실행기 v' + VERSION + ' 준비됨 (화면 조작 방식). 방식을 고르고, 먼저 \'시험 실행\'으로 확인해 보세요.');
 })();
