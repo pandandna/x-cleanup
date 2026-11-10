@@ -21,9 +21,9 @@
     <section class="notice" aria-labelledby="notice-h">
       <h2 id="notice-h">시작하기 전에</h2>
       <ul>
-        <li><strong>계정이 제한될 수 있습니다.</strong> 이 도구는 X 공식 API를 쓰지 않고, 로그인된 브라우저에서 X 웹이 보내는 요청을 대신 보냅니다. X는 이런 자동화를 허용하지 않습니다. 위험을 이해하는 경우에만 사용해 주세요.</li>
+        <li><strong>계정이 제한될 수 있습니다.</strong> 이 도구는 X 공식 API를 쓰지 않고, 로그인된 X 화면에서 사람이 누르는 버튼(⋯ → 삭제하기, 하트, 북마크)을 자동으로 누릅니다. X는 이런 자동화를 허용하지 않습니다. 위험을 이해하는 경우에만 사용해 주세요.</li>
         <li><strong>되돌릴 수 없습니다.</strong> 삭제한 게시물, 취소한 좋아요, 지운 북마크는 복구되지 않습니다. 3단계에서 백업을 먼저 받아 주세요.</li>
-        <li><strong>동작하지 않을 수 있습니다.</strong> X 내부 구조가 바뀌면 실행기가 멈출 수 있습니다. 소량으로 먼저 시험해 보세요. 오래된 좋아요는 X 쪽 제한으로 취소되지 않을 수 있습니다.</li>
+        <li><strong>동작하지 않을 수 있습니다.</strong> X 화면 구성이 바뀌면 실행기가 멈출 수 있습니다. 실행기의 &lsquo;시험 실행&rsquo;으로 먼저 확인해 보세요. 삭제된 게시물에 남은 좋아요는 화면에서 취소할 수 없습니다.</li>
       </ul>
     </section>
 
@@ -131,9 +131,9 @@
       </div>
 
       <div id="panel-bookmarks" role="tabpanel" aria-labelledby="tab-bookmarks" hidden>
-        <label class="inline big"><input type="checkbox" id="bm-all"> 북마크를 모두 삭제합니다</label>
+        <label class="inline big"><input type="checkbox" id="bm-all"> 북마크를 모두 해제합니다</label>
         <ul class="plain">
-          <li>X가 제공하는 &lsquo;모든 북마크 삭제&rsquo; 기능을 한 번 호출합니다. 일부만 골라 지우는 기능은 지원하지 않습니다.</li>
+          <li>실행기가 북마크 화면을 열어 보이는 북마크를 하나씩 해제합니다. 일부만 골라 지우는 기능은 지원하지 않습니다.</li>
           <li>북마크 목록은 아카이브에 들어 있지 않습니다. 백업이 필요하면 실행기의 &lsquo;북마크 백업&rsquo; 버튼으로 먼저 저장해 주세요.</li>
         </ul>
       </div>
@@ -159,8 +159,10 @@
         <li>PC 브라우저에서 <strong>내 계정으로 로그인한 x.com</strong> 탭을 엽니다.</li>
         <li><kbd>F12</kbd>(Mac은 <kbd>⌥</kbd><kbd>⌘</kbd><kbd>I</kbd>)를 눌러 개발자 도구의 <strong>Console</strong> 탭을 엽니다.</li>
         <li>아래 <strong>실행기 복사</strong>를 눌러 콘솔에 붙여 넣고 Enter를 누릅니다. 붙여넣기가 막혀 있으면 <code>allow pasting</code>을 입력하고 Enter를 누른 뒤 다시 붙여 넣습니다.</li>
-        <li>화면 오른쪽 아래에 나타난 <strong>X 정리 실행기</strong> 패널에서 3단계의 작업 파일을 선택하고, 속도를 고른 뒤 시작합니다.</li>
-        <li>실행 중에는 탭을 닫거나 새로고침하지 마세요. 중단되면 같은 작업 파일을 다시 선택해 이어서 진행할 수 있습니다.</li>
+        <li>화면 오른쪽 아래에 나타난 <strong>X 정리 실행기</strong> 패널에서 3단계의 작업 파일을 선택합니다.</li>
+        <li>먼저 <strong>시험 실행</strong>을 체크하고 실행해 보세요. 실제로 지우지 않고 삭제 확인 창까지만 열었다가 취소하므로, 지금의 X 화면에서 제대로 작동하는지 확인할 수 있습니다.</li>
+        <li>시험 결과에 실패가 없으면 체크를 풀고 속도를 고른 뒤 시작합니다. 실행기가 게시물 화면을 하나씩 열며 버튼을 누르므로 1건당 몇 초가 걸립니다.</li>
+        <li>실행 중에는 탭을 닫거나 새로고침하지 말고 화면에 띄워 두세요(다른 탭으로 가면 브라우저가 속도를 크게 늦춥니다). 중단되면 같은 작업 파일을 다시 선택해 이어서 진행할 수 있습니다.</li>
       </ol>
       <div class="row">
         <button type="button" class="btn primary" id="btn-copy-runner">실행기 복사</button>
