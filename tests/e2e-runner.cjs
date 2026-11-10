@@ -178,6 +178,8 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
     T('3201', 'erin', { date: '2023-01-01', liked: true }); T('3202', 'erin', { date: '2025-01-01', liked: true });
     for (let i = 10; i < 20; i++) T('34' + i, 'fran', { date: '2021-0' + ((i % 9) + 1) + '-01', liked: true });
     T('3501', 'alice'); T('3502', 'alice'); window.DB.bookmarks = ['3501', '3502'];
+    T('3005', 'me', { date: '2022-02-01', rtByMe: true }); // 내 글을 내가 재게시 → 게시물 탭에서 삭제됨(원글 삭제 시 재게시도 사라짐)
+    T('3103', 'gina', { date: '2021-01-01', rtByMe: true }); T('3104', 'hank', { date: '2021-01-02', rtByMe: true });
   };
   const setDirect = async (posts, likes, bms, before) => {
     const cb = (txt) => page.locator('#xclean-runner-host label', { hasText: txt }).first().locator('input');
@@ -193,14 +195,15 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   assert.equal(await page.locator('#xclean-runner-host select').first().inputValue(), 'direct');
   await setDirect(true, true, true, '');
   await startConfirmed(page, 'fast');
-  await waitPanel(page, /바로 정리 완료: 삭제\/취소 19개, 실패 0개/, 120000);
+  await waitPanel(page, /바로 정리 완료: 삭제\/취소 22개, 실패 0개/, 120000);
   const logD1 = await dbLog(page);
-  assert.deepEqual(logD1.filter((x) => x.startsWith('delete:')).sort(), ['delete:3001', 'delete:3002', 'delete:3003', 'delete:3004']);
-  assert.deepEqual(logD1.filter((x) => x.startsWith('unretweet:')), ['unretweet:3102']);
+  assert.deepEqual(logD1.filter((x) => x.startsWith('delete:')).sort(), ['delete:3001', 'delete:3002', 'delete:3003', 'delete:3004', 'delete:3005']);
+  assert.deepEqual(logD1.filter((x) => x.startsWith('unretweet:')), ['unretweet:3102', 'unretweet:3104', 'unretweet:3103']);
+  assert.ok(logD1.indexOf('unretweet:3102') > logD1.indexOf('delete:3004'));
   assert.equal(logD1.filter((x) => x.startsWith('unlike:')).length, 12);
   assert.deepEqual(logD1.filter((x) => x.startsWith('unbookmark:')).sort(), ['unbookmark:3501', 'unbookmark:3502']);
   assert.ok(!logD1.includes('delete:3101') && !logD1.includes('delete:3102'));
-  ok('바로 정리: 프로필 게시물·답글 삭제, 재게시 취소, 좋아요 12개(스크롤로 추가 로딩) 취소, 북마크 해제');
+  ok('바로 정리: 프로필 게시물·답글 삭제, 재게시 탭(/reposts)에서 재게시 취소, 좋아요 12개(스크롤로 추가 로딩) 취소, 북마크 해제');
   ok('답글 화면의 남의 글, 내 글을 인용한 남의 글은 삭제하지 않음');
 
   // D2. 날짜 기준
@@ -210,8 +213,8 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   await startConfirmed(page, 'fast');
   await waitPanel(page, /바로 정리 완료: 삭제\/취소 \d+개, 실패 0개/, 120000);
   const logD2 = await dbLog(page);
-  assert.deepEqual(logD2.filter((x) => x.startsWith('delete:')).sort(), ['delete:3002', 'delete:3003', 'delete:3004']);
-  assert.deepEqual(logD2.filter((x) => x.startsWith('unretweet:')), ['unretweet:3102']);
+  assert.deepEqual(logD2.filter((x) => x.startsWith('delete:')).sort(), ['delete:3002', 'delete:3003', 'delete:3004', 'delete:3005']);
+  assert.deepEqual(logD2.filter((x) => x.startsWith('unretweet:')), ['unretweet:3102', 'unretweet:3104', 'unretweet:3103']);
   assert.ok(logD2.includes('unlike:3201') && !logD2.includes('unlike:3202'));
   assert.equal(logD2.filter((x) => x.startsWith('unlike:')).length, 11);
   assert.ok(!logD2.some((x) => x.startsWith('unbookmark:')));

@@ -158,11 +158,16 @@
       const list = Object.values(DB.tweets).filter((t) => t.liked && !t.deleted).sort(byNewest);
       return lazy(list.map((t) => () => article(t, false)));
     }
+    if ((m = /^\/([^/]+)\/reposts\/?$/.exec(p)) && m[1].toLowerCase() === DB.me) {
+      col.innerHTML = '<div>프로필 ' + DB.me + ' · 재게시</div>';
+      const list = Object.values(DB.tweets).filter((t) => !t.deleted && !t.retweetOf && t.rtByMe).sort(byNewest);
+      return lazy(list.map((t) => () => article(t, false)));
+    }
     if ((m = /^\/([^/]+)(\/with_replies)?\/?$/.exec(p)) && m[1].toLowerCase() === DB.me && p !== '/home') {
       const replies = !!m[2];
       col.innerHTML = '<div>프로필 ' + DB.me + (replies ? ' · 답글' : ' · 게시물') + '</div>';
       const list = Object.values(DB.tweets).filter((t) => !t.deleted && !t.retweetOf && (
-        (t.author === DB.me && (replies || !t.replyTo)) || (t.rtByMe && t.author !== DB.me && !replies))).sort(byNewest);
+        t.author === DB.me && (replies || !t.replyTo))).sort(byNewest);
       const makers = [];
       list.forEach((t) => {
         if (replies && t.replyTo && DB.tweets[t.replyTo]) makers.push(() => article(DB.tweets[t.replyTo], false));
