@@ -387,7 +387,7 @@
     const nt = selectedTweets().length;
     const nl = selectedLikes().length;
     const bm = $('#bm-all').checked;
-    const parts = ['게시물·답글 ' + fmt(nt) + '개', '좋아요 ' + fmt(nl) + '개', '북마크 ' + (bm ? '전체 삭제' : '그대로 둠')];
+    const parts = ['게시물·답글 ' + fmt(nt) + '개', '좋아요 ' + fmt(nl) + '개', '북마크 ' + (bm ? '전체 해제' : '그대로 둠')];
     const sum = $('#export-summary');
     sum.textContent = parts.join(' · ');
     const items = nt + nl;
