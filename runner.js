@@ -38,6 +38,7 @@
     src: 'direct',       // 'direct'(작업 파일 없이) | 'job'(작업 파일)
     direct: { posts: true, likes: true, bookmarks: false, before: null },
     lastDirect: '',
+    alert: '',
     progress: { tweets: 0, likes: 0, bookmarks: 0 },
     stats: { ok: 0, gone: 0, fail: 0 },
     failed: [],
@@ -49,6 +50,42 @@
   };
 
   const bm = { map: new Map() };
+
+  /* ------------------------------------------- 요청 한도(429) 감지 — 읽기 전용 */
+  // X 화면이 스스로 보내는 요청의 응답 상태만 확인합니다. 요청 내용은 바꾸지 않습니다.
+  const RL = { hit: null, last: null };
+  const RL_IGNORE = /\/(jot|client_event|live_pipeline|promoted_content|metrics|badge_count)/;
+  function noteRateLimit(url, resetSec) {
+    const u = String(url || '');
+    if (!/\/i\/api\/|\/\/api\.(x|twitter)\.com\//.test(u) || RL_IGNORE.test(u)) return;
+    const info = { at: Date.now(), url: u.split('?')[0], resetAt: resetSec ? resetSec * 1000 : null };
+    RL.last = info;
+    if (S.running && !RL.hit) RL.hit = info;
+  }
+  const XP = XMLHttpRequest.prototype;
+  const NATIVE = { open: XP.open, send: XP.send };
+  XP.open = function (method, url) {
+    try { this.__xcUrl = String(url); } catch (e) { /* 무시 */ }
+    return NATIVE.open.apply(this, arguments);
+  };
+  XP.send = function () {
+    try {
+      this.addEventListener('loadend', function () {
+        if (this.status !== 429) return;
+        let reset = null;
+        try { reset = Number(this.getResponseHeader('x-rate-limit-reset')) || null; } catch (e) { /* 무시 */ }
+        noteRateLimit(this.__xcUrl || this.responseURL, reset);
+      });
+    } catch (e) { /* 무시 */ }
+    return NATIVE.send.apply(this, arguments);
+  };
+  let perfObs = null;
+  try {
+    perfObs = new PerformanceObserver((list) => {
+      list.getEntries().forEach((e) => { if (e.responseStatus === 429) noteRateLimit(e.name, null); });
+    });
+    perfObs.observe({ type: 'resource', buffered: false });
+  } catch (e) { perfObs = null; }
 
   /* ------------------------------------------------------------ 화면 도우미 */
 
@@ -67,7 +104,7 @@
   async function waitFor(fn, timeout, step) {
     const end = Date.now() + (timeout || 8000);
     for (;;) {
-      if (S.stop) return null;
+      if (S.stop || RL.hit) return null;
       let v = null;
       try { v = fn(); } catch (e) { v = null; }
       if (v) return v;
@@ -303,9 +340,20 @@
     await tick(1500);
     window.scrollTo(0, 0);
     const seen = new Set();
-    let idle = 0; let acted = 0; let consec = []; let transient = 0;
+    let idle = 0; let acted = 0; let consec = []; let transient = 0; let reload = false;
     while (!S.stop) {
       if (S.paused) { await waitResume(); continue; }
+      if (RL.hit) { rlPause(); reload = true; continue; }
+      if (reload) {
+        // 한도 초과로 목록이 덜 불러와졌을 수 있으므로 화면을 다시 엽니다.
+        reload = false;
+        go('/home'); await tick(800); go(st.path);
+        await waitFor(() => timelineArticles().length > 0 || null, PAGE_TIMEOUT, 200);
+        await tick(1500);
+        window.scrollTo(0, 0);
+        idle = 0;
+        continue;
+      }
       if (S.dry && acted >= DRY_MAX) break;
 
       const err = document.querySelector('[data-testid="primaryColumn"] [data-testid="error-detail"]');
@@ -330,6 +378,7 @@
         const before = seen.size;
         window.scrollBy(0, Math.round(window.innerHeight * 0.9));
         await sleep(1300);
+        if (RL.hit) { rlPause(); reload = true; idle = 0; continue; }
         const fresh = timelineArticles().some((a) => { const id = articleId(a); return id && !seen.has(id); });
         idle = fresh || seen.size !== before ? 0 : idle + 1;
         if (idle >= 6) break;
@@ -339,8 +388,11 @@
       S.note = st.label + ' 처리 중: ' + tid;
       render();
       let r;
+      RL.hit = null;
       try { r = await act(target, tid); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
       if (S.stop) break;
+      if (RL.hit && r.kind !== 'ok') { seen.delete(tid); rlPause(); reload = true; continue; }
+      RL.hit = null;
       if (r.kind === 'ok') { S.stats.ok++; acted++; consec = []; transient = 0; }
       else if (r.kind === 'gone') { S.stats.gone++; consec = []; }
       else {
@@ -367,6 +419,7 @@
   }
 
   async function startDirect() {
+    RL.hit = null; S.alert = '';
     S.mode = 'direct';
     S.running = true; S.paused = false; S.stop = false; S.confirming = false;
     S.stash = { progress: S.progress, stats: S.stats, failed: S.failed };
@@ -432,6 +485,23 @@
     render();
   }
 
+  // 요청 한도 초과: 알리고 자동으로 일시정지합니다. (진행 중이던 항목은 실패로 세지 않고, 재개하면 다시 시도합니다.)
+  function rlPause() {
+    const h = RL.hit || RL.last;
+    RL.hit = null;
+    closeMenus();
+    const cancel = document.querySelector('[data-testid="confirmationSheetCancel"]');
+    if (cancel) { try { cancel.click(); } catch (e) { /* 무시 */ } }
+    const when = h && h.resetAt && h.resetAt > Date.now()
+      ? new Date(h.resetAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }) : null;
+    S.alert = 'X가 요청 한도 초과(429 Too Many Requests)를 알렸습니다. 자동으로 일시정지했습니다.\n'
+      + (when ? '한도는 ' + when + ' 무렵 풀릴 예정입니다. 그 이후에 ' : '보통 15분 정도 지나면 풀립니다. 잠시 기다린 뒤 ')
+      + '\'재개\'를 눌러 주세요. 속도를 \'안전\'으로 낮추는 것을 권장합니다.\n진행 중이던 항목은 실패로 세지 않았고, 재개하면 다시 시도합니다.';
+    try { console.warn('[X 정리 실행기] 요청 한도 초과(429)로 일시정지했습니다.' + (when ? ' ' + when + ' 이후 재개하세요.' : '')); } catch (e) { /* 무시 */ }
+    S.rlPauses = (S.rlPauses || 0) + 1;
+    pauseWith('요청 한도 초과(429)로 자동 일시정지' + (when ? ' — ' + when + ' 이후 재개 권장' : ' — 약 15분 뒤 재개 권장'));
+  }
+
   async function transientWait() {
     S.transient++;
     const ms = Math.min(30000 * Math.pow(2, S.transient - 1), 8 * 60000) * TS;
@@ -480,8 +550,11 @@
       S.note = '처리 중: ' + id;
       render();
       let r;
+      RL.hit = null;
       try { r = await st.fn(id); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
       if (S.stop) return;
+      if (RL.hit && (!r || r.kind !== 'ok')) { rlPause(); continue; } // 같은 항목을 재개 후 다시 시도
+      RL.hit = null;
       if (!r) continue;
 
       if (r.kind === 'transient') {
@@ -559,6 +632,7 @@
     while (!S.stop) {
       if (S.paused) { await waitResume(); continue; }
       if (!BM_PATH_RE.test(location.pathname)) { await openBookmarks(); await tick(800); }
+      if (RL.hit) { rlPause(); continue; }
       const b = document.querySelector('article [data-testid="removeBookmark"]');
       if (!b) {
         idle++;
@@ -568,8 +642,11 @@
         continue;
       }
       idle = 0;
+      RL.hit = null;
       press(b);
       await waitFor(() => !b.isConnected || b.getAttribute('data-testid') !== 'removeBookmark' || null, 5000);
+      if (RL.hit && b.isConnected && b.getAttribute('data-testid') === 'removeBookmark') { rlPause(); continue; }
+      RL.hit = null;
       removed++;
       S.note = '북마크 ' + removed + '개 해제';
       render();
@@ -586,6 +663,7 @@
 
   async function startDelete() {
     const job = S.job;
+    RL.hit = null; S.alert = '';
     S.mode = 'delete';
     S.running = true; S.paused = false; S.stop = false; S.confirming = false;
     if (S.dry) {
@@ -759,6 +837,12 @@
     ui.hostWarn = el('div', { color: '#ff7b72', display: 'none' }, { text: 'x.com 또는 twitter.com 탭에서만 사용할 수 있습니다.' });
     body.appendChild(ui.hostWarn);
 
+    ui.alert = el('div', {
+      display: 'none', whiteSpace: 'pre-line', background: '#3a2a05', color: '#ffd166', border: '1px solid #c99a1d', borderRadius: '8px', padding: '9px', fontWeight: '600',
+    });
+    ui.alert.setAttribute('role', 'alert');
+    body.appendChild(ui.alert);
+
     // 방식 선택
     ui.srcRow = el('div', { display: 'flex', alignItems: 'center', gap: '8px' });
     ui.srcRow.appendChild(el('span', null, { text: '방식' }));
@@ -825,7 +909,7 @@
     ui.btnRow = el('div', { display: 'flex', gap: '6px', flexWrap: 'wrap' });
     ui.start = btn('시작', onStartClick, 'primary');
     ui.pause = btn('일시정지', onPauseClick, 'neutral');
-    ui.stopBtn = btn('중지', () => { S.stop = true; S.paused = false; log('중지 요청'); render(); }, 'danger');
+    ui.stopBtn = btn('중지', () => { S.stop = true; S.paused = false; S.alert = ''; log('중지 요청'); render(); }, 'danger');
     ui.btnRow.appendChild(ui.start); ui.btnRow.appendChild(ui.pause); ui.btnRow.appendChild(ui.stopBtn);
     body.appendChild(ui.btnRow);
 
@@ -885,6 +969,7 @@
   function onPauseClick() {
     if (!S.running || (S.mode !== 'delete' && S.mode !== 'direct')) return;
     S.paused = !S.paused;
+    if (!S.paused) { S.alert = ''; RL.hit = null; }
     log(S.paused ? '일시정지' : '재개');
     render();
   }
@@ -941,6 +1026,8 @@
   function render() {
     if (!host) return;
     show(ui.hostWarn, !HOST_OK);
+    show(ui.alert, !!S.alert);
+    ui.alert.textContent = S.alert || '';
     const direct = S.src === 'direct';
     const loaded = !!S.job;
     ui.src.disabled = S.running;
@@ -1008,6 +1095,8 @@
 
   function destroy() {
     S.stop = true; S.paused = false;
+    XP.open = NATIVE.open; XP.send = NATIVE.send;
+    if (perfObs) { try { perfObs.disconnect(); } catch (e) { /* 무시 */ } }
     if (host && host.parentNode) host.parentNode.removeChild(host);
     host = null;
     if (window.__xcleanRunner && window.__xcleanRunner.version === VERSION) delete window.__xcleanRunner;
