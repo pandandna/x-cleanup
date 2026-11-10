@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>X 계정 정리 도구</title>
+  <meta name="description" content="X(트위터) 아카이브로 내 게시물·답글·좋아요·북마크를 골라 정리하는 도구. 파일은 브라우저 안에서만 처리됩니다.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <h1>X 계정 정리 도구</h1>
+      <p class="lead">내 게시물·답글·좋아요·북마크를 골라서 정리합니다. 아카이브 분석과 선택은 이 페이지 안에서만 이루어지고, 파일은 어디로도 전송되지 않습니다.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="notice" aria-labelledby="notice-h">
+      <h2 id="notice-h">시작하기 전에</h2>
+      <ul>
+        <li><strong>계정이 제한될 수 있습니다.</strong> 이 도구는 X 공식 API를 쓰지 않고, 로그인된 브라우저에서 X 웹이 보내는 요청을 대신 보냅니다. X는 이런 자동화를 허용하지 않습니다. 위험을 이해하는 경우에만 사용해 주세요.</li>
+        <li><strong>되돌릴 수 없습니다.</strong> 삭제한 게시물, 취소한 좋아요, 지운 북마크는 복구되지 않습니다. 3단계에서 백업을 먼저 받아 주세요.</li>
+        <li><strong>동작하지 않을 수 있습니다.</strong> X 내부 구조가 바뀌면 실행기가 멈출 수 있습니다. 소량으로 먼저 시험해 보세요. 오래된 좋아요는 X 쪽 제한으로 취소되지 않을 수 있습니다.</li>
+      </ul>
+    </section>
+
+    <section class="card" id="step-load" aria-labelledby="h-load">
+      <h2 id="h-load"><span class="num">1</span>아카이브 불러오기</h2>
+      <p class="hint">
+        X에서 <a href="https://x.com/settings/your_twitter_data/data" target="_blank" rel="noopener noreferrer">데이터 아카이브</a>를 요청해 받으세요(설정 → 계정 → 데이터 아카이브 다운로드, 준비에 수일이 걸릴 수 있습니다).
+        받은 <strong>ZIP 파일을 그대로</strong> 올리거나, 압축을 풀어 <code>tweets.js</code>·<code>like.js</code>를 선택하셔도 됩니다.
+        북마크만 지우실 경우에는 이 단계를 건너뛰셔도 됩니다.
+      </p>
+      <label class="drop" id="drop" for="file-input">
+        <span class="drop-title">여기에 파일을 끌어다 놓거나 눌러서 선택</span>
+        <span class="drop-sub">.zip · tweets.js · tweets-part1.js · tweet-headers.js · like.js</span>
+      </label>
+      <input id="file-input" type="file" multiple accept=".zip,.js,.json" hidden>
+      <ul id="load-status" class="status-list" aria-live="polite"></ul>
+    </section>
+
+    <section class="card" id="step-select" aria-labelledby="h-select">
+      <h2 id="h-select"><span class="num">2</span>정리 대상 고르기</h2>
+      <div class="tabs" role="tablist" aria-label="정리 대상 종류">
+        <button type="button" role="tab" id="tab-tweets" data-tab="tweets" aria-selected="true" aria-controls="panel-tweets">게시물·답글 <span class="count" id="tab-tweets-count"></span></button>
+        <button type="button" role="tab" id="tab-likes" data-tab="likes" aria-selected="false" aria-controls="panel-likes">좋아요 <span class="count" id="tab-likes-count"></span></button>
+        <button type="button" role="tab" id="tab-bookmarks" data-tab="bookmarks" aria-selected="false" aria-controls="panel-bookmarks">북마크</button>
+      </div>
+
+      <div id="panel-tweets" role="tabpanel" aria-labelledby="tab-tweets">
+        <div class="presets">
+          <span class="presets-label">빠른 설정</span>
+          <button type="button" class="chip" id="p-reset">전체</button>
+          <button type="button" class="chip" id="p-year">1년 이상 지난 것</button>
+          <button type="button" class="chip" id="p-reply">답글만</button>
+        </div>
+        <div class="filters">
+          <fieldset class="field wide">
+            <legend>유형</legend>
+            <div class="checks">
+              <label class="inline"><input type="checkbox" id="k-original" checked> 일반 게시물</label>
+              <label class="inline"><input type="checkbox" id="k-reply" checked> 답글</label>
+              <label class="inline"><input type="checkbox" id="k-retweet" checked> 리트윗</label>
+              <label class="inline"><input type="checkbox" id="k-unknown" checked> 유형 불명 <span class="sub">(본문 없는 헤더 파일 항목)</span></label>
+            </div>
+          </fieldset>
+          <div class="field"><label for="f-from">이 날짜부터</label><input type="date" id="f-from"></div>
+          <div class="field"><label for="f-to">이 날짜까지</label><input type="date" id="f-to"></div>
+          <div class="field wide"><label for="f-include">포함 단어 <span class="sub">쉼표로 구분 · 하나라도 들어 있으면 대상</span></label><input type="text" id="f-include" autocomplete="off"></div>
+          <div class="field wide"><label for="f-exclude">제외 단어 <span class="sub">들어 있으면 보존</span></label><input type="text" id="f-exclude" autocomplete="off"></div>
+          <div class="field"><label for="f-keepfav">받은 좋아요 N개 이상은 보존</label><input type="number" min="0" id="f-keepfav" placeholder="사용 안 함"></div>
+          <div class="field wide"><label for="f-protect">보존할 게시물 <span class="sub">주소 또는 ID, 줄바꿈·쉼표로 구분</span></label><textarea id="f-protect" rows="2" spellcheck="false"></textarea></div>
+        </div>
+        <p class="summary" id="tw-summary"></p>
+        <div class="viewbar">
+          <span class="presets-label">목록 보기</span>
+          <label class="inline"><input type="radio" name="tw-view" value="match" checked> 삭제 대상 후보</label>
+          <label class="inline"><input type="radio" name="tw-view" value="keep"> 보존되는 것</label>
+          <label class="inline"><input type="radio" name="tw-view" value="all"> 전체</label>
+          <button type="button" class="link" id="tw-reset-over">직접 바꾼 선택 되돌리기</button>
+        </div>
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead><tr>
+              <th class="c-check"><input type="checkbox" id="tw-all" aria-label="이 페이지 전체 선택"></th>
+              <th class="c-date">작성일</th><th class="c-kind">유형</th><th>내용</th><th class="c-num">♥</th>
+            </tr></thead>
+            <tbody id="tw-body"></tbody>
+          </table>
+          <p class="empty" id="tw-empty">아카이브를 불러오면 목록이 표시됩니다.</p>
+        </div>
+        <div class="pager">
+          <button type="button" class="btn small" id="tw-prev">이전</button>
+          <span id="tw-page" aria-live="polite"></span>
+          <button type="button" class="btn small" id="tw-next">다음</button>
+        </div>
+      </div>
+
+      <div id="panel-likes" role="tabpanel" aria-labelledby="tab-likes" hidden>
+        <p class="hint">좋아요 기록에는 날짜가 없어 단어로만 거를 수 있습니다. 목록의 체크로 직접 고르셔도 됩니다.</p>
+        <div class="filters">
+          <div class="field wide"><label for="l-include">포함 단어 <span class="sub">쉼표로 구분 · 하나라도 들어 있으면 대상</span></label><input type="text" id="l-include" autocomplete="off"></div>
+          <div class="field wide"><label for="l-exclude">제외 단어 <span class="sub">들어 있으면 보존</span></label><input type="text" id="l-exclude" autocomplete="off"></div>
+        </div>
+        <p class="summary" id="lk-summary"></p>
+        <div class="viewbar">
+          <span class="presets-label">목록 보기</span>
+          <label class="inline"><input type="radio" name="lk-view" value="match" checked> 취소 대상 후보</label>
+          <label class="inline"><input type="radio" name="lk-view" value="keep"> 유지되는 것</label>
+          <label class="inline"><input type="radio" name="lk-view" value="all"> 전체</label>
+          <button type="button" class="link" id="lk-reset-over">직접 바꾼 선택 되돌리기</button>
+        </div>
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead><tr>
+              <th class="c-check"><input type="checkbox" id="lk-all" aria-label="이 페이지 전체 선택"></th>
+              <th>내용</th><th class="c-link">원문</th>
+            </tr></thead>
+            <tbody id="lk-body"></tbody>
+          </table>
+          <p class="empty" id="lk-empty">아카이브를 불러오면 목록이 표시됩니다.</p>
+        </div>
+        <div class="pager">
+          <button type="button" class="btn small" id="lk-prev">이전</button>
+          <span id="lk-page" aria-live="polite"></span>
+          <button type="button" class="btn small" id="lk-next">다음</button>
+        </div>
+      </div>
+
+      <div id="panel-bookmarks" role="tabpanel" aria-labelledby="tab-bookmarks" hidden>
+        <label class="inline big"><input type="checkbox" id="bm-all"> 북마크를 모두 삭제합니다</label>
+        <ul class="plain">
+          <li>X가 제공하는 &lsquo;모든 북마크 삭제&rsquo; 기능을 한 번 호출합니다. 일부만 골라 지우는 기능은 지원하지 않습니다.</li>
+          <li>북마크 목록은 아카이브에 들어 있지 않습니다. 백업이 필요하면 실행기의 &lsquo;북마크 백업&rsquo; 버튼으로 먼저 저장해 주세요.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="card" id="step-export" aria-labelledby="h-export">
+      <h2 id="h-export"><span class="num">3</span>백업하고 작업 파일 만들기</h2>
+      <p class="summary" id="export-summary"></p>
+      <div class="row">
+        <button type="button" class="btn" id="btn-backup-json">백업 받기 (JSON)</button>
+        <button type="button" class="btn" id="btn-backup-csv">백업 받기 (CSV)</button>
+      </div>
+      <label class="inline ack"><input type="checkbox" id="ack"> 삭제·취소는 되돌릴 수 없고, 계정이 제한될 수 있음을 이해했습니다.</label>
+      <div class="row">
+        <button type="button" class="btn danger" id="btn-job">작업 파일 만들기</button>
+      </div>
+      <p class="hint" id="export-note"></p>
+    </section>
+
+    <section class="card" id="step-run" aria-labelledby="h-run">
+      <h2 id="h-run"><span class="num">4</span>X에서 실행하기</h2>
+      <ol class="steps">
+        <li>PC 브라우저에서 <strong>내 계정으로 로그인한 x.com</strong> 탭을 엽니다.</li>
+        <li><kbd>F12</kbd>(Mac은 <kbd>⌥</kbd><kbd>⌘</kbd><kbd>I</kbd>)를 눌러 개발자 도구의 <strong>Console</strong> 탭을 엽니다.</li>
+        <li>아래 <strong>실행기 복사</strong>를 눌러 콘솔에 붙여 넣고 Enter를 누릅니다. 붙여넣기가 막혀 있으면 <code>allow pasting</code>을 입력하고 Enter를 누른 뒤 다시 붙여 넣습니다.</li>
+        <li>화면 오른쪽 아래에 나타난 <strong>X 정리 실행기</strong> 패널에서 3단계의 작업 파일을 선택하고, 속도를 고른 뒤 시작합니다.</li>
+        <li>실행 중에는 탭을 닫거나 새로고침하지 마세요. 중단되면 같은 작업 파일을 다시 선택해 이어서 진행할 수 있습니다.</li>
+      </ol>
+      <div class="row">
+        <button type="button" class="btn primary" id="btn-copy-runner">실행기 복사</button>
+      </div>
+      <details id="runner-details">
+        <summary>실행기 코드 직접 확인하기</summary>
+        <p class="hint">콘솔에 붙여 넣는 코드는 계정 전체에 접근할 수 있으므로, 실행 전에 내용을 확인하시기 바랍니다. x.com 이외의 서버로는 아무것도 보내지 않습니다.</p>
+        <pre id="runner-src" tabindex="0"></pre>
+      </details>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    <p>이 페이지는 외부 서버와 통신하지 않도록 설정되어 있습니다(Content-Security-Policy). 비공식 도구이며 X Corp.와 무관합니다.</p>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="js/core.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
