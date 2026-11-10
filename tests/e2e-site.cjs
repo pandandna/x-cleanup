@@ -134,7 +134,7 @@ const ok = (name) => { results.push(name); console.log('  ✓', name); };
   await page.check('#ack');
   assert.equal(await page.isDisabled('#btn-job'), false);
   const exportSummary = await page.textContent('#export-summary');
-  assert.match(exportSummary, /게시물·답글 32개 · 좋아요 3개 · 북마크 전체 삭제/);
+  assert.match(exportSummary, /게시물·답글 32개 · 좋아요 3개 · 북마크 전체 해제/);
   ok('내보내기 요약과 확인 체크 전에는 작업 파일 버튼 비활성');
 
   const dl = async (sel) => {
