@@ -53,6 +53,12 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   await ctx.route('https://x.com/**', (route) => {
     const u = new URL(route.request().url());
     if (u.pathname === '/static/mock-x.js') return route.fulfill({ status: 200, contentType: 'text/javascript', body: mockSrc });
+    if (u.pathname.startsWith('/i/api/')) {
+      if (u.searchParams.get('rl') === '1') {
+        return route.fulfill({ status: 429, contentType: 'application/json', headers: { 'x-rate-limit-reset': String(Math.floor(Date.now() / 1000) + 900) }, body: '{"errors":[{"code":88,"message":"Rate limit exceeded"}]}' });
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+    }
     return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: shell });
   });
   await ctx.route('https://example.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><p>other site</p>' }));
@@ -221,6 +227,48 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   assert.deepEqual(await dbLog(page), []);
   assert.equal(await page.evaluate(() => !document.getElementById('dlg') && Object.values(window.DB.tweets).every((t) => !t.deleted) && window.DB.bookmarks.length === 2), true);
   ok('바로 정리 시험 실행: 실제 변경 0건');
+
+
+  /* ---- R. 요청 한도(429) → 알림 + 자동 일시정지 → 재개 후 같은 항목부터 */
+  // R1. 작업 파일 방식
+  await openX(page, () => {
+    window.DB.tweets['160'] = { id: '160', author: 'me' }; window.DB.tweets['161'] = { id: '161', author: 'me' };
+    window.DB.rlOnce = new Set(['160']);
+  });
+  await inject(page);
+  await upload(page, mkJob('a1a1a1a1a1a1', ['160', '161'], [], false));
+  await startConfirmed(page, 'fast');
+  await waitPanel(page, /요청 한도 초과\(429\)로 자동 일시정지/, 60000);
+  let txt429 = await panelText(page);
+  assert.match(txt429, /429 Too Many Requests/);
+  assert.match(txt429, /0 \/ 2 \(0%\).*실패 0/);
+  assert.match(txt429, /무렵 풀릴 예정/);
+  assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('xclean-runner-host').shadowRoot.querySelector('[role=alert]')).display), 'block');
+  assert.deepEqual(await dbLog(page), ['429:160']);
+  await page.waitForTimeout(1500);
+  assert.deepEqual(await dbLog(page), ['429:160']);
+  ok('429 발생 시 알림 표시 후 자동 일시정지, 해당 항목은 실패로 세지 않고 더 진행하지 않음');
+  await btn(page, '재개').click();
+  await waitPanel(page, /완료: 삭제\/취소 2개, 이미 없음 0개, 실패 0개/, 60000);
+  assert.deepEqual(await dbLog(page), ['429:160', 'delete:160', 'delete:161']);
+  assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('xclean-runner-host').shadowRoot.querySelector('[role=alert]')).display), 'none');
+  ok('재개하면 알림이 사라지고 같은 항목부터 다시 처리해 완료');
+
+  // R2. 바로 정리 방식
+  await openX(page, () => {
+    window.DB.tweets['3601'] = { id: '3601', author: 'me', date: '2023-01-02' };
+    window.DB.tweets['3602'] = { id: '3602', author: 'me', date: '2023-01-01' };
+    window.DB.rlOnce = new Set(['3601']);
+  });
+  await inject(page);
+  await setDirect(true, false, false, '');
+  await startConfirmed(page, 'fast');
+  await waitPanel(page, /요청 한도 초과\(429\)로 자동 일시정지/, 60000);
+  assert.deepEqual(await dbLog(page), ['429:3601']);
+  await btn(page, '재개').click();
+  await waitPanel(page, /바로 정리 완료: 삭제\/취소 2개, 실패 0개/, 120000);
+  assert.deepEqual((await dbLog(page)).filter((x) => x.startsWith('delete:')).sort(), ['delete:3601', 'delete:3602']);
+  ok('바로 정리에서도 429 시 자동 일시정지, 재개 후 그 항목까지 모두 삭제');
 
   /* ---- 5. 북마크 백업 */
   await openX(page, () => {

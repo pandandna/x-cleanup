@@ -10,6 +10,7 @@
     routeDelay: 300,
     loggedIn: true,
     batch: 4,
+    rlOnce: new Set(),   // 이 ID 를 삭제할 때 한 번은 429(Too Many Requests)로 실패
     log: [],
   };
 
@@ -104,6 +105,14 @@
     const no = h('button', { 'data-testid': 'confirmationSheetCancel' }, '취소');
     ok.addEventListener('click', () => {
       d.remove();
+      if (DB.rlOnce.has(t.id)) {
+        DB.rlOnce.delete(t.id);
+        DB.log.push('429:' + t.id);
+        const x = new XMLHttpRequest();
+        x.open('POST', '/i/api/graphql/mockQid/DeleteTweet?rl=1');
+        x.send('{}');
+        return; // 삭제되지 않음
+      }
       setTimeout(() => {
         t.deleted = true;
         DB.log.push('delete:' + t.id);
