@@ -27,12 +27,19 @@
     nav.innerHTML = DB.loggedIn ? '<a data-testid="AppTabBar_Profile_Link" href="/' + DB.me + '">프로필</a>' : '<a href="/login">로그인</a>';
   }
 
-  function article(t, focal) {
+  function article(t, focal, opts) {
+    opts = opts || {};
     const a = h('article', { 'data-testid': 'tweet', 'data-id': t.id, style: 'display:block;min-height:260px;border-bottom:1px solid #ccc' });
+    // 스레드에서 앞 게시물과 이어지는 선(프로필 사진 위) + 프로필 사진
+    if (opts.lineAbove) a.appendChild(h('div', { style: 'width:2px;height:8px;background:rgb(51,54,57);margin-left:19px' }));
+    a.appendChild(h('div', { 'data-testid': 'Tweet-User-Avatar', style: 'width:40px;height:40px;background:#888' }));
     const dt = (t.date || '2024-01-01') + 'T00:00:00.000Z';
     if (t.rtByMe && t.author !== DB.me && !focal) a.appendChild(h('div', { 'data-testid': 'socialContext' }, '내가 재게시함'));
     a.appendChild(h('div', { 'data-testid': 'User-Name' },
       '<a href="/' + t.author + '">' + t.author + '</a> <a href="/' + t.author + '/status/' + t.id + '"><time datetime="' + dt + '">' + dt.slice(0, 10) + '</time></a>'));
+    // 실제 X처럼: 답글이 앞 글 없이 단독으로 보이면 '○○ 님에게 보내는 답글' 표시가 붙습니다.
+    const labelTo = t.replyLabel || (t.replyTo && !opts.lineAbove && !focal && DB.tweets[t.replyTo] ? DB.tweets[t.replyTo].author : null);
+    if (labelTo) a.appendChild(h('div', {}, '<a href="/' + labelTo + '">@' + labelTo + '</a> 님에게 보내는 답글'));
     a.appendChild(h('div', { 'data-testid': 'tweetText' }, t.text || ('글 ' + t.id)));
     if (t.quote && DB.tweets[t.quote]) {
       const q = DB.tweets[t.quote];
@@ -167,11 +174,12 @@
       const replies = !!m[2];
       col.innerHTML = '<div>프로필 ' + DB.me + (replies ? ' · 답글' : ' · 게시물') + '</div>';
       const list = Object.values(DB.tweets).filter((t) => !t.deleted && !t.retweetOf && (
-        t.author === DB.me && (replies || !t.replyTo))).sort(byNewest);
+        t.author === DB.me && (replies || (!t.replyTo && !t.replyLabel && !t.hideOnPosts)))).sort(byNewest);
       const makers = [];
       list.forEach((t) => {
-        if (replies && t.replyTo && DB.tweets[t.replyTo]) makers.push(() => article(DB.tweets[t.replyTo], false));
-        makers.push(() => article(t, false));
+        const threaded = replies && t.replyTo && DB.tweets[t.replyTo] && !DB.tweets[t.replyTo].deleted;
+        if (threaded) makers.push(() => article(DB.tweets[t.replyTo], false));
+        makers.push(() => article(t, false, { lineAbove: threaded }));
       });
       return lazy(makers);
     }

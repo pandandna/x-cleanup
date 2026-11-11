@@ -181,19 +181,19 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
     T('3005', 'me', { date: '2022-02-01', rtByMe: true }); // 내 글을 내가 재게시 → 게시물 탭에서 삭제됨(원글 삭제 시 재게시도 사라짐)
     T('3103', 'gina', { date: '2021-01-01', rtByMe: true }); T('3104', 'hank', { date: '2021-01-02', rtByMe: true });
   };
-  const setDirect = async (posts, likes, bms, before) => {
+  const setDirect = async (o) => {
     const cb = (txt) => page.locator('#xclean-runner-host label', { hasText: txt }).first().locator('input');
-    await cb('내 게시물·답글 삭제')[posts ? 'check' : 'uncheck']();
-    await cb('좋아요 취소 (마음에')[likes ? 'check' : 'uncheck']();
-    await cb('북마크 전체 해제')[bms ? 'check' : 'uncheck']();
-    await page.locator('#xclean-runner-host input[type=date]').fill(before || '');
+    const map = [['posts', '내 게시물 삭제'], ['replies', '내 답글 삭제'], ['reposts', '재게시 취소'], ['likes', '좋아요 취소 (마음에'], ['bms', '북마크 전체 해제']];
+    for (const [k, txt] of map) await cb(txt)[o[k] ? 'check' : 'uncheck']();
+    await page.locator('#xclean-runner-host input[type=date]').fill(o.before || '');
   };
+  const ALL = { posts: true, replies: true, reposts: true, likes: true };
 
   // D1. 전체
   await openX(page, setupDirect, 'https://x.com/home');
   await inject(page);
   assert.equal(await page.locator('#xclean-runner-host select').first().inputValue(), 'direct');
-  await setDirect(true, true, true, '');
+  await setDirect(Object.assign({}, ALL, { bms: true }));
   await startConfirmed(page, 'fast');
   await waitPanel(page, /바로 정리 완료: 삭제\/취소 22개, 실패 0개/, 120000);
   const logD1 = await dbLog(page);
@@ -206,10 +206,40 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   ok('바로 정리: 프로필 게시물·답글 삭제, 재게시 탭(/reposts)에서 재게시 취소, 좋아요 12개(스크롤로 추가 로딩) 취소, 북마크 해제');
   ok('답글 화면의 남의 글, 내 글을 인용한 남의 글은 삭제하지 않음');
 
+
+  // D4. 게시물 / 답글 / 재게시를 각각 따로
+  const setupKinds = () => {
+    const T = (id, author, extra) => { window.DB.tweets[id] = Object.assign({ id, author }, extra || {}); };
+    T('4001', 'me', { date: '2023-01-06' }); T('4002', 'me', { date: '2023-01-05' });
+    T('4101', 'bob', { date: '2023-01-04' }); T('4003', 'me', { date: '2023-01-04', replyTo: '4101' }); // 스레드형 답글(선)
+    T('4004', 'me', { date: '2023-01-03', replyLabel: 'carl' });                                     // '님에게 보내는 답글' 표시
+    T('4005', 'me', { date: '2023-01-05', replyTo: '4002' });                                        // 내 글에 이어 쓴 답글
+    T('4102', 'dina', { date: '2023-01-02', rtByMe: true });
+    T('4006', 'me', { date: '2020-01-01', hideOnPosts: true }); // 실제 X처럼 '게시물' 탭에 안 나오고 '답글' 탭에만 나오는 오래된 게시물
+  };
+  const kinds = async (opt) => {
+    await openX(page, setupKinds);
+    await inject(page);
+    await setDirect(opt);
+    await startConfirmed(page, 'fast');
+    await waitPanel(page, /바로 정리 완료: 삭제\/취소 \d+개, 실패 0개/, 120000);
+    const l = await dbLog(page);
+    return { del: l.filter((x) => x.startsWith('delete:')).map((x) => x.slice(7)).sort(), rt: l.filter((x) => x.startsWith('unretweet:')).map((x) => x.slice(10)) };
+  };
+  let k = await kinds({ replies: true });
+  assert.deepEqual(k, { del: ['4003', '4004', '4005'], rt: [] });
+  ok('답글만 체크: 스레드형 답글·표시형 답글·내 글에 이어 쓴 답글만 삭제, 게시물·재게시는 그대로');
+  k = await kinds({ posts: true });
+  assert.deepEqual(k, { del: ['4001', '4002', '4006'], rt: [] });
+  ok('게시물만 체크: 게시물만 삭제(게시물 탭에 안 나오는 오래된 게시물은 답글 탭에서 찾아 삭제), 답글·재게시는 그대로');
+  k = await kinds({ reposts: true });
+  assert.deepEqual(k, { del: [], rt: ['4102'] });
+  ok('재게시만 체크: 재게시만 취소, 게시물·답글은 그대로');
+
   // D2. 날짜 기준
   await openX(page, setupDirect, 'https://x.com/home');
   await inject(page);
-  await setDirect(true, true, false, '2023-07-01');
+  await setDirect(Object.assign({}, ALL, { before: '2023-07-01' }));
   await startConfirmed(page, 'fast');
   await waitPanel(page, /바로 정리 완료: 삭제\/취소 \d+개, 실패 0개/, 120000);
   const logD2 = await dbLog(page);
@@ -223,7 +253,7 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   // D3. 시험 실행
   await openX(page, setupDirect, 'https://x.com/home');
   await inject(page);
-  await setDirect(true, true, true, '');
+  await setDirect(Object.assign({}, ALL, { bms: true }));
   await page.locator('#xclean-runner-host input[type=checkbox]').last().check();
   await btn(page, '시험 실행').click();
   await waitPanel(page, /시험 실행 완료: 처리 가능 \d+개, 실패 0개 \(실제로 지운 것은 없습니다\)/, 120000);
@@ -266,7 +296,7 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
     window.DB.rlOnce = new Set(['3601']);
   });
   await inject(page);
-  await setDirect(true, false, false, '');
+  await setDirect({ posts: true });
   await startConfirmed(page, 'fast');
   await waitPanel(page, /요청 한도 초과\(429\) — .*자동 재개 예정/, 60000);
   assert.deepEqual(await dbLog(page), ['429:3601']);
