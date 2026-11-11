@@ -36,7 +36,7 @@
     dry: false,          // 시험 실행: 확인 창까지만 열고 취소
     stash: null,
     src: 'direct',       // 'direct'(작업 파일 없이) | 'job'(작업 파일)
-    direct: { posts: true, likes: true, bookmarks: false, before: null },
+    direct: { posts: true, replies: true, reposts: true, likes: true, bookmarks: false, before: null },
     lastDirect: '',
     alert: '',
     progress: { tweets: 0, likes: 0, bookmarks: 0 },
@@ -321,11 +321,34 @@
   const timelineArticles = () => Array.from(document.querySelectorAll('[data-testid="primaryColumn"] article'));
   const onTimeline = (id) => timelineArticles().some((x) => articleId(x) === id);
 
-  function pickMine(a) {
-    if (!dateOk(a)) return null;
-    if (isMine(a)) return (art, id) => menuDelete(art, () => !art.isConnected || !onTimeline(id)).then((r) => (r.kind === 'nomenu' ? { kind: 'fail', msg: '메뉴에서 \'삭제하기\'를 찾지 못했습니다' } : r));
-    if (a.querySelector('[data-testid="unretweet"]')) return (art) => undoRetweet(art);
-    return null;
+  // 답글인지 판별: '@○○ 님에게 보내는 답글' 표시가 있거나, 프로필 사슬(스레드)에서 앞 게시물과 이어지는 선이 프로필 사진 위에 있으면 답글입니다.
+  const REPLY_LABEL_RE = /님에게 보내는 답글|replying to|返信先/i;
+  function hasThreadLineAbove(a) {
+    const av = a.querySelector('[data-testid="Tweet-User-Avatar"]');
+    if (!av) return false;
+    const top = av.getBoundingClientRect().top;
+    for (const d of a.querySelectorAll('div')) {
+      if (av.contains(d)) continue;
+      const r = d.getBoundingClientRect();
+      if (r.width > 0 && r.width <= 3 && r.height >= 4 && r.bottom <= top + 2) {
+        const bg = getComputedStyle(d).backgroundColor;
+        if (bg && bg !== 'transparent' && !/rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/.test(bg)) return true;
+      }
+    }
+    return false;
+  }
+  function isReply(a) {
+    const head = (a.innerText || '').slice(0, 400);
+    return REPLY_LABEL_RE.test(head) || hasThreadLineAbove(a);
+  }
+  const deleteHere = (art, id) => menuDelete(art, () => !art.isConnected || !onTimeline(id))
+    .then((r) => (r.kind === 'nomenu' ? { kind: 'fail', msg: '메뉴에서 \'삭제하기\'를 찾지 못했습니다' } : r));
+
+  // 프로필 '게시물'·'답글' 탭: 체크한 종류(게시물/답글)의 내 글만 삭제합니다. 재게시는 '재게시' 탭에서 따로 처리합니다.
+  function pickOwn(a) {
+    if (!dateOk(a) || !isMine(a)) return null;
+    const want = isReply(a) ? S.direct.replies : S.direct.posts;
+    return want ? deleteHere : null;
   }
   // 프로필 '재게시' 탭: 재게시 취소만 합니다(내 글을 내가 재게시한 경우에도 원글은 지우지 않음).
   function pickRepost(a) {
@@ -438,9 +461,11 @@
     if (S.dry) log('시험 실행: 단계마다 ' + DRY_MAX + '개까지만 확인하고, 실제로 지우지 않습니다.');
     if (S.direct.before) log('기준: ' + S.direct.before.toLocaleDateString('ko-KR') + ' 이전 게시물만');
     const d = S.direct;
-    if (d.posts) {
-      await sweep({ key: 'tweets', label: '내 게시물', path: me, pick: pickMine });
-      if (!S.stop) await sweep({ key: 'tweets', label: '내 답글', path: me + '/with_replies', pick: pickMine });
+    if (d.posts && !S.stop) await sweep({ key: 'tweets', label: '게시물 탭', path: me, pick: pickOwn });
+    // '게시물' 탭에는 오래된 게시물이 안 나오는 경우가 있어, '답글' 탭(게시물+답글이 함께 나옴)도 훑습니다.
+    // 체크한 종류(게시물/답글)만 지웁니다.
+    if ((d.posts || d.replies) && !S.stop) await sweep({ key: 'tweets', label: '답글 탭', path: me + '/with_replies', pick: pickOwn });
+    if (d.reposts && !S.stop) {
       // X 프로필에서 재게시는 별도의 '재게시' 탭(/아이디/reposts)에 모여 있습니다.
       if (!S.stop) await sweep({ key: 'tweets', label: '재게시', path: me + '/reposts', pick: pickRepost });
     }
@@ -902,7 +927,9 @@
       ui.direct.appendChild(el('label', { display: 'flex', alignItems: 'center' }, null, [cb, el('span', null, { text: label })]));
       return cb;
     };
-    ui.dPosts = dmk('posts', '내 게시물·답글 삭제, 재게시 취소 (프로필 화면)');
+    ui.dPosts = dmk('posts', '내 게시물 삭제');
+    ui.dReplies = dmk('replies', '내 답글 삭제');
+    ui.dReposts = dmk('reposts', '재게시 취소');
     ui.dLikes = dmk('likes', '좋아요 취소 (마음에 들어요 목록)');
     ui.dBms = dmk('bookmarks', '북마크 전체 해제');
     const dateRow = el('label', { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', color: '#9ba7b0' });
@@ -993,7 +1020,7 @@
     if (S.running) return;
     if (S.src === 'direct') {
       const d = S.direct;
-      if (!d.posts && !d.likes && !d.bookmarks) { log('정리할 항목을 하나 이상 체크해 주세요.'); return; }
+      if (!d.posts && !d.replies && !d.reposts && !d.likes && !d.bookmarks) { log('정리할 항목을 하나 이상 체크해 주세요.'); return; }
       if (S.dry) { startDirect(); return; }
       S.confirming = true;
       render();
@@ -1073,7 +1100,7 @@
     const loaded = !!S.job;
     ui.src.disabled = S.running;
     show(ui.direct, direct, 'flex');
-    [ui.dPosts, ui.dLikes, ui.dBms, ui.dBefore].forEach((x) => { x.disabled = S.running; });
+    [ui.dPosts, ui.dReplies, ui.dReposts, ui.dLikes, ui.dBms, ui.dBefore].forEach((x) => { x.disabled = S.running; });
     show(ui.pick, HOST_OK && !S.running && !direct, 'block');
     show(ui.summary, !direct);
     show(ui.opts, loaded && !direct, 'flex');
@@ -1106,7 +1133,7 @@
     show(ui.barWrap, loaded && !direct);
 
     const busy = S.running;
-    const anyDirect = S.direct.posts || S.direct.likes || S.direct.bookmarks;
+    const anyDirect = S.direct.posts || S.direct.replies || S.direct.reposts || S.direct.likes || S.direct.bookmarks;
     setEnabled(ui.start, HOST_OK && !busy && !S.confirming && (direct ? anyDirect : (loaded && total > 0)));
     setEnabled(ui.pause, busy && (S.mode === 'delete' || S.mode === 'direct'));
     ui.pause.textContent = S.paused ? '재개' : '일시정지';
@@ -1116,7 +1143,9 @@
       const d = S.direct;
       const parts = [];
       const when = d.before ? ' (' + d.before.toLocaleDateString('ko-KR') + ' 이전 것만)' : ' (전부)';
-      if (d.posts) parts.push('내 게시물·답글 삭제, 재게시 취소' + when);
+      if (d.posts) parts.push('내 게시물 삭제' + when);
+      if (d.replies) parts.push('내 답글 삭제' + when);
+      if (d.reposts) parts.push('재게시 취소' + when);
       if (d.likes) parts.push('좋아요 취소' + when);
       if (d.bookmarks) parts.push('북마크 전체 해제');
       ui.confirmText.textContent = parts.join('\n') + '\n\n삭제는 되돌릴 수 없습니다. 고정된 게시물도 포함됩니다.\n실행 중에는 이 탭을 새로고침하거나 닫지 말고, 화면에 띄워 두세요.\n(실행기가 프로필·좋아요·북마크 화면을 스크롤하며 버튼을 누릅니다.)';
