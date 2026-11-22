@@ -141,11 +141,18 @@
   }
   const PEND_OP = { DeleteTweet: 'delete', DeleteRetweet: 'unretweet', UnfavoriteTweet: 'unlike', DeleteBookmark: 'unbookmark' };
   // 서버 응답 → 결과. 버튼을 이미 눌렀으므로(화면에서는 사라졌을 수 있음) 실패하면 미완료 목록에 올릴 정보(pend)를 붙입니다.
+  const GONE_CODES = new Set([144, 34, 421]);          // 게시물이 이미 없음
+  const AUTH_CODES = new Set([32, 89, 215, 353]);       // 로그인/인증 문제
+  const BLOCK_CODES = new Set([64, 226, 261, 326]);     // 자동화 의심·계정 잠김/정지 등 차단
   function mutResult(m, opName, id, what) {
     const pend = { op: PEND_OP[opName], id };
-    if (!m) return { kind: 'fail', msg: what + ': 서버 응답을 확인하지 못했습니다', pend };
+    if (!m) return { kind: 'fail', msg: what + ': 서버 응답을 확인하지 못했습니다', pend, noresp: true, offline: !navigator.onLine };
     if (m.ok) return { kind: 'ok', pend };
+    if (GONE_CODES.has(m.code)) return { kind: 'gone', msg: what + ': 이미 없음(코드 ' + m.code + ')', pend };
     if (m.status === 429 || RL_CODES.has(m.code)) return { kind: 'fail', msg: what + ': 요청 한도 초과(' + (m.code || m.status) + ')', rl: true, pend };
+    if (m.status === 0) return { kind: 'fail', msg: what + ': 네트워크 오류로 응답 없음', pend, offline: !navigator.onLine };
+    if (m.status === 401 || AUTH_CODES.has(m.code) || (m.status === 403 && !m.code)) return { kind: 'fail', msg: what + ': 로그인/인증 오류(' + (m.code || m.status) + ')', auth: true, pend };
+    if (BLOCK_CODES.has(m.code)) return { kind: 'fail', msg: what + ': X가 요청을 차단함 — ' + m.msg + ' (코드 ' + m.code + ')', block: true, pend };
     return { kind: 'fail', msg: what + ': 서버가 처리하지 않음 — ' + m.msg + (m.code ? ' (코드 ' + m.code + ')' : ''), pend };
   }
   let perfObs = null;
@@ -403,7 +410,7 @@
   const onTimeline = (id) => timelineArticles().some((x) => articleId(x) === id);
 
   // 답글인지 판별: '@○○ 님에게 보내는 답글' 표시가 있거나, 프로필 사슬(스레드)에서 앞 게시물과 이어지는 선이 프로필 사진 위에 있으면 답글입니다.
-  const REPLY_LABEL_RE = /님에게 보내는 답글|replying to|返信先/i;
+  const REPLY_LABEL_RE = /님에게 보내는 답글|replying to|返信先|回复|回覆|en respuesta a|en réponse à|antwort an|em resposta a|in risposta a/i;
   function hasThreadLineAbove(a) {
     const av = a.querySelector('[data-testid="Tweet-User-Avatar"]');
     if (!av) return false;
@@ -442,16 +449,21 @@
   }
 
   // 목록 화면을 위에서부터 훑으며 조건에 맞는 항목을 하나씩 처리합니다.
-  async function sweep(st) {
-    log(st.label + ' 정리 시작');
+  async function sweep(st, pass) {
+    log(st.label + (pass ? ' 다시 확인 (' + (pass + 1) + '회차: 남은 항목이 더 불러와지는지 확인)' : ' 정리 시작'));
+    if (pass) { go('/home'); await tick(800); }
+    const t0 = Date.now();
     go(st.path);
-    await waitFor(() => location.pathname.toLowerCase() === st.path.toLowerCase() && (timelineArticles().length > 0 || primaryText().length > 40) || null, PAGE_TIMEOUT, 200);
+    // 목록이 뜨거나, 로딩 표시가 사라진 채 잠시 지나면(빈 목록) 시작합니다.
+    await waitFor(() => location.pathname.toLowerCase() === st.path.toLowerCase()
+      && (timelineArticles().length > 0 || (Date.now() - t0 > 2500 && !document.querySelector('[data-testid="primaryColumn"] [role="progressbar"]'))) || null, PAGE_TIMEOUT, 200);
     await tick(1500);
     window.scrollTo(0, 0);
     const seen = new Set();
     let idle = 0; let acted = 0; let consec = []; let transient = 0; let reload = false;
     while (!S.stop) {
       if (S.paused) { await waitResume(); continue; }
+      if (!navigator.onLine) { await waitOnline(); reload = true; continue; }
       if (RL.hit) { await rlWait(); reload = true; continue; }
       if (reload) {
         // 한도 초과로 목록이 덜 불러와졌을 수 있으므로 화면을 다시 엽니다.
@@ -490,7 +502,7 @@
         if (RL.hit) { await rlWait(); reload = true; idle = 0; continue; }
         const fresh = timelineArticles().some((a) => { const id = articleId(a); return id && !seen.has(id); });
         idle = fresh || seen.size !== before ? 0 : idle + 1;
-        if (idle >= 6) break;
+        if (idle >= (timelineArticles().length ? 6 : 3)) break; // 빈 목록이면 빨리 끝냄
         continue;
       }
       idle = 0;
@@ -500,13 +512,10 @@
       RL.hit = null;
       try { r = await act(target, tid); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
       if (S.stop) break;
-      if ((RL.hit || r.rl) && r.kind !== 'ok') {
-        if (r.pend) addPending(r.pend, r.msg); // 화면에서는 이미 사라졌을 수 있으므로 기록해 두고 나중에 다시 처리
-        seen.delete(tid); await rlWait(); reload = true; continue;
-      }
+      if (await handleHard(r)) { seen.delete(tid); reload = true; continue; } // 같은 항목을 다시 시도
       RL.hit = null;
       if (r.kind === 'ok') { S.stats.ok++; acted++; consec = []; transient = 0; if (r.pend) removePending(r.pend); }
-      else if (r.kind === 'gone') { S.stats.gone++; consec = []; }
+      else if (r.kind === 'gone') { S.stats.gone++; consec = []; if (r.pend) removePending(r.pend); }
       else {
         if (r.pend) addPending(r.pend, r.msg);
         S.stats.fail++;
@@ -520,7 +529,7 @@
           S.failed.splice(S.failed.length - consec.length, consec.length);
           consec = [];
           window.scrollTo(0, 0);
-          pauseWith('연속 ' + FAIL_LIMIT + '회 실패했습니다 (마지막: ' + r.msg + '). X 화면을 확인하고 \'재개\'를 눌러 주세요.');
+          pauseWith('연속 ' + FAIL_LIMIT + '회 실패했습니다 (마지막: ' + r.msg + ').' + (r.noresp ? ' X가 요청 방식을 바꾸었을 수 있습니다.' : '') + ' X 화면을 확인하고 \'재개\'를 눌러 주세요.');
           continue;
         }
       }
@@ -529,12 +538,24 @@
     }
     S.note = '';
     log(st.label + ' 정리 끝' + (S.dry ? ' (시험)' : '') + ': ' + acted + '개');
+    return acted;
+  }
+
+  // X 목록은 한 번에 일부만 불러오거나 중간에 더 불러오지 않는 경우가 있어,
+  // 처리한 항목이 있으면 화면을 다시 불러와 남은 항목이 없을 때까지 반복합니다.
+  const MAX_PASSES = 50;
+  async function sweepAll(st) {
+    for (let pass = 0; pass < MAX_PASSES && !S.stop; pass++) {
+      const acted = await sweep(st, pass);
+      if (S.dry || !acted) break;
+    }
   }
 
   async function startDirect() {
     RL.hit = null; S.alert = '';
     S.mode = 'direct';
     S.running = true; S.paused = false; S.stop = false; S.confirming = false;
+    lockBeat();
     S.stash = { progress: S.progress, stats: S.stats, failed: S.failed };
     S.progress = { tweets: 0, likes: 0, bookmarks: 0 };
     S.stats = { ok: 0, gone: 0, fail: 0 };
@@ -547,15 +568,15 @@
     if (S.direct.before) log('기준: ' + S.direct.before.toLocaleDateString('ko-KR') + ' 이전 게시물만');
     await runPending('시작 전');
     const d = S.direct;
-    if (d.posts && !S.stop) await sweep({ key: 'tweets', label: '게시물 탭', path: me, pick: pickOwn });
+    if (d.posts && !S.stop) await sweepAll({ key: 'tweets', label: '게시물 탭', path: me, pick: pickOwn });
     // '게시물' 탭에는 오래된 게시물이 안 나오는 경우가 있어, '답글' 탭(게시물+답글이 함께 나옴)도 훑습니다.
     // 체크한 종류(게시물/답글)만 지웁니다.
-    if ((d.posts || d.replies) && !S.stop) await sweep({ key: 'tweets', label: '답글 탭', path: me + '/with_replies', pick: pickOwn });
+    if ((d.posts || d.replies) && !S.stop) await sweepAll({ key: 'tweets', label: '답글 탭', path: me + '/with_replies', pick: pickOwn });
     if (d.reposts && !S.stop) {
       // X 프로필에서 재게시는 별도의 '재게시' 탭(/아이디/reposts)에 모여 있습니다.
-      if (!S.stop) await sweep({ key: 'tweets', label: '재게시', path: me + '/reposts', pick: pickRepost });
+      if (!S.stop) await sweepAll({ key: 'tweets', label: '재게시', path: me + '/reposts', pick: pickRepost });
     }
-    if (d.likes && !S.stop) await sweep({ key: 'likes', label: '좋아요', path: '/i/history/likes', pick: pickLike });
+    if (d.likes && !S.stop) await sweepAll({ key: 'likes', label: '좋아요', path: '/i/history/likes', pick: pickLike });
     if (d.bookmarks && !S.stop) await runBookmarksAll();
     await runPending('마무리');
     const r = S.stats;
@@ -574,11 +595,12 @@
   function loadPendingAll() {
     try { const a = JSON.parse(localStorage.getItem(PEND_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
   }
-  function savePendingAll(list) {
-    try { localStorage.setItem(PEND_KEY, JSON.stringify(list.slice(-5000))); } catch (e) { /* 무시 */ }
-  }
   const myKey = () => myProfilePath() || '?';
   const loadPending = () => loadPendingAll().filter((p) => p.me === myKey());
+  function savePendingAll(list) {
+    try { localStorage.setItem(PEND_KEY, JSON.stringify(list.slice(-5000))); } catch (e) { /* 무시 */ }
+    S.pendN = loadPending().length;
+  }
   function addPending(pend, msg) {
     if (!pend || !pend.op || !pend.id || S.dry) return;
     const all = loadPendingAll();
@@ -654,7 +676,7 @@
         let r;
         try { r = await retryPendingItem(p); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
         if (S.stop) return;
-        if (r.kind !== 'ok' && (RL.hit || r.rl) && tries < 4) { tries++; await rlWait(); continue; }
+        if (tries < 4 && await handleHard(r)) { tries++; continue; }
         if (r.kind === 'transient' && tries < 3) { tries++; await transientWait(); continue; }
         if (r.kind === 'ok') { removePending(p); unfail(p.id); S.stats.ok++; fixed++; }
         else if (r.kind === 'gone') { removePending(p); unfail(p.id); S.stats.gone++; }
@@ -673,6 +695,32 @@
     const n = loadPending().length;
     return n ? '\n서버가 처리하지 않은 미완료 항목 ' + n + '개가 남았습니다(X 화면에서는 사라져 보일 수 있음). 페이지를 새로고침(F5)한 뒤 실행기를 다시 붙여 넣고 시작하면 이 항목부터 다시 처리합니다.' : '';
   }
+
+  /* ------------------------------------------------- 탭 중복 실행 방지 / 떠나기 경고 */
+  const LOCK_KEY = 'xclean:lock';
+  const TAB_ID = Math.random().toString(36).slice(2);
+  function readLock() { try { return JSON.parse(localStorage.getItem(LOCK_KEY) || 'null'); } catch (e) { return null; } }
+  function otherTabRunning() { const l = readLock(); return !!(l && l.tab !== TAB_ID && Date.now() - l.at < 12000); }
+  function lockBeat() { if (!S.running) return; try { localStorage.setItem(LOCK_KEY, JSON.stringify({ tab: TAB_ID, at: Date.now() })); } catch (e) { /* 무시 */ } }
+  function unlock() { const l = readLock(); if (l && l.tab === TAB_ID) { try { localStorage.removeItem(LOCK_KEY); } catch (e) { /* 무시 */ } } }
+  const lockTimer = setInterval(lockBeat, 3000);
+  function busyElsewhere() {
+    if (!otherTabRunning()) return false;
+    log('다른 탭에서 실행기가 작업 중입니다. 같은 항목을 두 번 처리하거나 기록이 꼬일 수 있으니 한 탭에서만 실행해 주세요.');
+    return true;
+  }
+  function onBeforeUnload(e) {
+    if (!S.running || S.stop) return undefined;
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
+  }
+  window.addEventListener('beforeunload', onBeforeUnload);
+  function onVisibility() {
+    if (document.hidden && S.running) log('주의: 탭이 화면에서 가려졌습니다. 브라우저가 이 탭을 느리게 만들 수 있으니 다시 띄워 두세요.');
+    render();
+  }
+  document.addEventListener('visibilitychange', onVisibility);
 
   /* ------------------------------------------------------------- 진행/저장 */
 
@@ -759,6 +807,39 @@
     render();
   }
 
+  async function waitOnline() {
+    if (navigator.onLine) { await tick(1000); return; }
+    const msg = '인터넷 연결이 끊겼습니다. 연결되면 자동으로 이어서 진행합니다.';
+    log(msg);
+    S.alert = msg;
+    render();
+    while (!navigator.onLine && !S.stop) await tick(500);
+    S.alert = '';
+    if (!S.stop) { log('인터넷이 다시 연결되어 이어서 진행합니다.'); await tick(1500); }
+    render();
+  }
+
+  function hardPause(r) {
+    if (r.block) {
+      S.speed = 'safe';
+      if (ui.speed) ui.speed.value = 'safe';
+      S.alert = 'X가 자동화된 동작으로 의심하거나 계정 상태 때문에 요청을 막았습니다.\n(' + r.msg + ')\n일시정지하고 속도를 \'안전\'으로 바꿨습니다. 몇 시간 쉬었다가 X에 정상적으로 접속되는지 확인한 뒤 \'재개\'를 눌러 주세요.';
+      pauseWith('X 차단 응답으로 일시정지: ' + r.msg);
+    } else {
+      S.alert = '로그인이 풀렸거나 인증에 문제가 있습니다.\n(' + r.msg + ')\n이 탭은 그대로 두고, 다른 탭에서 X에 다시 로그인한 뒤 \'재개\'를 눌러 주세요.';
+      pauseWith('로그인/인증 오류로 일시정지: ' + r.msg);
+    }
+  }
+
+  // 결과 공통 처리. 같은 항목을 다시 시도해야 하면 true. (화면에서는 이미 사라졌을 수 있으므로 미완료로도 기록)
+  async function handleHard(r) {
+    if (!r || r.kind === 'ok' || r.kind === 'gone') return false;
+    if (!navigator.onLine || r.offline) { if (r.pend) addPending(r.pend, r.msg); await waitOnline(); return true; }
+    if (RL.hit || r.rl) { if (r.pend) addPending(r.pend, r.msg); await rlWait(); return true; }
+    if (r.auth || r.block) { if (r.pend) addPending(r.pend, r.msg); hardPause(r); await waitResume(); S.alert = ''; return true; }
+    return false;
+  }
+
   async function transientWait() {
     S.transient++;
     const ms = Math.min(30000 * Math.pow(2, S.transient - 1), 8 * 60000) * TS;
@@ -802,6 +883,7 @@
     while (S.progress[st.key] < st.ids.length) {
       if (S.stop) return;
       if (S.paused) { await waitResume(); continue; }
+      if (!navigator.onLine) { await waitOnline(); continue; }
       const i = S.progress[st.key];
       const id = st.ids[i];
       S.note = '처리 중: ' + id;
@@ -810,13 +892,10 @@
       RL.hit = null;
       try { r = await st.fn(id); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
       if (S.stop) return;
-      if ((RL.hit || (r && r.rl)) && (!r || r.kind !== 'ok')) { // 같은 항목을 기다렸다가 다시 시도
-        if (r && r.pend) addPending(r.pend, r.msg);
-        await rlWait(); continue;
-      }
-      RL.hit = null;
       if (!r) continue;
-      if (r.kind === 'ok' && r.pend) removePending(r.pend);
+      if (await handleHard(r)) continue; // 같은 항목을 기다렸다가 다시 시도
+      RL.hit = null;
+      if ((r.kind === 'ok' || r.kind === 'gone') && r.pend) removePending(r.pend);
       if (r.kind === 'fail' && r.pend) addPending(r.pend, r.msg);
 
       if (r.kind === 'transient') {
@@ -893,6 +972,7 @@
     let removed = 0; let idle = 0; let bmFails = 0;
     while (!S.stop) {
       if (S.paused) { await waitResume(); continue; }
+      if (!navigator.onLine) { await waitOnline(); await openBookmarks(); continue; }
       if (!BM_PATH_RE.test(location.pathname)) { await openBookmarks(); await tick(800); }
       if (RL.hit) { await rlWait(); continue; }
       const b = document.querySelector('article [data-testid="removeBookmark"]');
@@ -909,9 +989,10 @@
       const bid = row ? articleId(row) : null;
       const r = await unbookmarkOne(b, bid);
       if (S.stop) break;
+      if (r.kind === 'gone') { if (r.pend) removePending(r.pend); S.stats.gone++; continue; }
       if (r.kind !== 'ok') {
         if (r.pend) addPending(r.pend, r.msg);
-        if (RL.hit || r.rl) { await rlWait(); continue; }
+        if (await handleHard(r)) continue;
         S.stats.fail++;
         S.failed.push({ stage: 'bookmarks', id: bid || '-', message: r.msg });
         log('실패 ' + (bid || '') + ': ' + r.msg);
@@ -942,6 +1023,7 @@
     RL.hit = null; S.alert = '';
     S.mode = 'delete';
     S.running = true; S.paused = false; S.stop = false; S.confirming = false;
+    lockBeat();
     if (S.dry) {
       S.stash = { progress: S.progress, stats: S.stats, failed: S.failed };
       S.progress = { tweets: 0, likes: 0, bookmarks: 0 };
@@ -975,9 +1057,11 @@
 
   async function startPendingOnly() {
     if (S.running || !loadPending().length) return;
+    if (busyElsewhere()) return;
     RL.hit = null; S.alert = '';
     S.mode = 'direct';
     S.running = true; S.paused = false; S.stop = false; S.confirming = false;
+    lockBeat();
     S.stash = { progress: S.progress, stats: S.stats, failed: S.failed };
     S.progress = { tweets: 0, likes: 0, bookmarks: 0 };
     S.stats = { ok: 0, gone: 0, fail: 0 };
@@ -993,6 +1077,7 @@
   function finish(msg) {
     const wasDirect = S.mode === 'direct';
     S.running = false; S.paused = false; S.mode = null; S.note = '';
+    unlock();
     log(msg);
     if (S.stash) {
       // 시험 실행·바로 정리 결과는 기록에만 남기고, 작업 파일 진행 상황은 원래대로 되돌립니다.
@@ -1032,12 +1117,15 @@
 
   async function backupBookmarks() {
     if (S.running) return;
+    if (busyElsewhere()) return;
     S.mode = 'bm'; S.running = true; S.stop = false; S.paused = false;
+    lockBeat();
     bm.map.clear();
     log('북마크 화면으로 이동해 수집합니다. 화면이 자동으로 스크롤됩니다.');
     render();
     if (!(await openBookmarks())) {
       S.running = false; S.mode = null;
+      unlock();
       log('북마크 화면이 열리지 않았습니다.');
       render();
       return;
@@ -1064,6 +1152,7 @@
       }, null, 2));
     }
     S.running = false; S.mode = null; S.note = '';
+    unlock();
     log(list.length ? '북마크 ' + list.length + '개를 파일로 저장했습니다.' : '수집된 북마크가 없습니다.');
     render();
   }
@@ -1257,6 +1346,7 @@
 
   function onStartClick() {
     if (S.running) return;
+    if (busyElsewhere()) return;
     if (S.src === 'direct') {
       const d = S.direct;
       if (!d.posts && !d.replies && !d.reposts && !d.likes && !d.bookmarks) { log('정리할 항목을 하나 이상 체크해 주세요.'); return; }
@@ -1367,6 +1457,7 @@
       t = fmt(done) + ' / ' + fmt(total) + ' (' + pct + '%)  ·  ' + (S.dry && S.stash ? '처리 가능 ' : '삭제/취소 ') + fmt(S.stats.ok) + '  ·  이미 없음 ' + fmt(S.stats.gone) + '  ·  실패 ' + fmt(S.stats.fail);
     }
     if (S.note) t = (t ? t + '\n' : '') + S.note;
+    if (S.running && document.hidden) t = (t ? t + '\n' : '') + '⚠ 탭이 화면에 보이지 않아 느려질 수 있습니다.';
     ui.progressText.style.whiteSpace = 'pre-line';
     ui.progressText.textContent = t;
     show(ui.barWrap, loaded && !direct);
@@ -1396,7 +1487,7 @@
       ui.confirmText.textContent = parts.join('\n') + '\n\n삭제는 되돌릴 수 없습니다. 백업을 받으셨는지 확인해 주세요.\n실행 중에는 이 탭을 새로고침하거나 닫지 말고, 화면에 띄워 두세요.\n(실행기가 X 화면을 자동으로 이동하며 버튼을 누릅니다.)';
     }
     setEnabled(ui.bmBackup, HOST_OK && !busy);
-    const pn = HOST_OK ? loadPending().length : 0;
+    const pn = HOST_OK ? (S.pendN || 0) : 0;
     show(ui.pendLine, pn > 0);
     ui.pendLine.textContent = '미완료 ' + fmt(pn) + '개: 버튼은 눌렀지만 X 서버가 처리하지 않은 항목입니다. 시작하면 먼저 다시 처리합니다.';
     show(ui.pendRun, pn > 0 && !busy);
@@ -1411,6 +1502,10 @@
     S.stop = true; S.paused = false;
     XP.open = NATIVE.open; XP.send = NATIVE.send;
     if (NATIVE.fetch) window.fetch = NATIVE.fetch;
+    clearInterval(lockTimer);
+    if (S.running) unlock();
+    window.removeEventListener('beforeunload', onBeforeUnload);
+    document.removeEventListener('visibilitychange', onVisibility);
     if (perfObs) { try { perfObs.disconnect(); } catch (e) { /* 무시 */ } }
     if (host && host.parentNode) host.parentNode.removeChild(host);
     host = null;
@@ -1419,6 +1514,7 @@
   window.__xcleanRunner = { version: VERSION, destroy, mutations: () => MUT.map((m) => Object.assign({}, m)) };
 
   buildUi();
+  if (HOST_OK) S.pendN = loadPending().length;
   if (!HOST_OK) log('이 탭(' + location.hostname + ')에서는 실행할 수 없습니다.');
   else if (loadPending().length) log('지난 실행에서 서버가 처리하지 않은 미완료 항목 ' + loadPending().length + '개가 있습니다. 시작하면 먼저 다시 처리합니다.');
   render();
