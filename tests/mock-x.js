@@ -13,6 +13,13 @@
     rlOnce: new Set(),   // 이 ID 의 삭제/취소 요청이 한 번은 429(Too Many Requests)로 실패
     srvFail: new Set(),  // 이 ID 의 삭제/취소 요청은 서버가 항상 거부(200 + errors)
     srvFailOnce: new Set(),
+    srvGone: new Set(),      // 서버: 이미 없음(코드 144)
+    srvBlockOnce: new Set(), // 서버: 자동화 의심 차단(코드 226) 한 번
+    srvAuthOnce: new Set(),  // 서버: 401 한 번
+    offlineOnce: new Set(),  // 이 ID 요청 때 인터넷이 잠깐(offlineMs) 끊김
+    offlineMs: 1500,
+    offline: false,
+    timelineCap: 0,          // >0 이면 목록을 한 번에 이 개수까지만 보여 줌(다시 불러오면 다음 것)
     statusHidden: false, // true 면 화면에서 숨겨진 항목은 게시물 화면에서도 '없음'으로 보임(가장 나쁜 경우)
     client: {},          // 화면(클라이언트 저장소)에만 반영된 상태: id -> { deleted, liked, rtByMe, unbm } — 새로고침하면 사라짐
     keep: false,
@@ -30,6 +37,9 @@
     try { sessionStorage.setItem('mockServer', JSON.stringify({ me: DB.me, tweets: DB.tweets, bookmarks: DB.bookmarks, log: DB.log })); } catch (e) { /* 무시 */ }
   }
   window.__mockSave = save;
+  // 테스트 편의: 내 게시물 여러 개 만들기(최신순)
+  window.__mkPosts = (ids) => ids.forEach((id, i) => { DB.tweets[id] = { id, author: DB.me, date: '2023-05-' + String(28 - i).padStart(2, '0') }; });
+  try { Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => !DB.offline }); } catch (e) { /* 무시 */ }
   const C = (id) => (DB.client[id] = DB.client[id] || {});
   const view = (t) => Object.assign({}, t, DB.client[t.id] || {});
 
@@ -39,6 +49,15 @@
     if (DB.rlOnce.has(id)) { DB.rlOnce.delete(id); q = '?rl=1'; DB.log.push('429:' + id); }
     else if (DB.srvFail.has(id)) { q = '?fail=1'; DB.log.push('srvfail:' + id); }
     else if (DB.srvFailOnce.has(id)) { DB.srvFailOnce.delete(id); q = '?fail=1'; DB.log.push('srvfail:' + id); }
+    else if (DB.srvGone.has(id)) { q = '?gone=1'; DB.log.push('gone:' + id); }
+    else if (DB.srvBlockOnce.has(id)) { DB.srvBlockOnce.delete(id); q = '?block=1'; DB.log.push('block:' + id); }
+    else if (DB.srvAuthOnce.has(id)) { DB.srvAuthOnce.delete(id); q = '?auth=1'; DB.log.push('auth:' + id); }
+    else if (DB.offlineOnce.has(id)) {
+      DB.offlineOnce.delete(id); q = '?net=1'; DB.log.push('offline:' + id);
+      DB.offline = true;
+      window.dispatchEvent(new Event('offline'));
+      setTimeout(() => { DB.offline = false; window.dispatchEvent(new Event('online')); }, DB.offlineMs);
+    }
     const x = new XMLHttpRequest();
     x.open('POST', '/i/api/graphql/mockQ/' + op + q);
     x.setRequestHeader('content-type', 'application/json');
@@ -221,7 +240,7 @@
   const byNewest = (a, b) => ((b.date || '') + b.id).localeCompare((a.date || '') + a.id);
   let pending = [];
   function lazy(makers) {
-    pending = makers.slice();
+    pending = DB.timelineCap > 0 ? makers.slice(0, DB.timelineCap) : makers.slice();
     more();
   }
   function more() {

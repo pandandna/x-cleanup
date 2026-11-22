@@ -62,6 +62,10 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
       if (u.searchParams.get('rl') === '1') {
         return route.fulfill({ status: 429, contentType: 'application/json', headers: { 'x-rate-limit-reset': String(Math.floor(Date.now() / 1000) + 900) }, body: '{"errors":[{"code":88,"message":"Rate limit exceeded"}]}' });
       }
+      if (u.searchParams.get('net') === '1') return route.abort('internetdisconnected');
+      if (u.searchParams.get('gone') === '1') return route.fulfill({ status: 200, contentType: 'application/json', body: '{"errors":[{"code":144,"message":"No status found with that ID."}]}' });
+      if (u.searchParams.get('block') === '1') return route.fulfill({ status: 200, contentType: 'application/json', body: '{"errors":[{"code":226,"message":"This request looks like it might be automated."}]}' });
+      if (u.searchParams.get('auth') === '1') return route.fulfill({ status: 401, contentType: 'application/json', body: '{"errors":[{"code":32,"message":"Could not authenticate you."}]}' });
       if (u.searchParams.get('fail') === '1') {
         return route.fulfill({ status: 200, contentType: 'application/json', body: '{"errors":[{"code":131,"message":"Internal error"}]}' });
       }
@@ -395,6 +399,85 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   assert.equal(await pendCount(), 0);
   await page.evaluate(() => { sessionStorage.removeItem('mockKeep'); sessionStorage.removeItem('mockServer'); });
   ok('새로고침 후 다시 붙여넣으면 미완료 항목을 다시 처리해 실제로 삭제');
+
+
+  /* ---- N. 예상 문제 대비 */
+  const run2 = async (setup, opt, doneRe, during) => {
+    await openX(page, setup);
+    await inject(page);
+    await setDirect(opt);
+    await startConfirmed(page, 'fast');
+    if (during) await during();
+    await waitPanel(page, doneRe, 180000);
+    return dbLog(page);
+  };
+
+  // N1. 목록이 한 번에 일부만 나오는 경우 → 다시 불러와 끝까지 처리
+  let lg = await run2(() => { window.__mkPosts(['5001', '5002', '5003', '5004', '5005', '5006', '5007', '5008', '5009']); window.DB.timelineCap = 3; },
+    { posts: true }, /바로 정리 완료: 삭제\/취소 9개, 실패 0개/);
+  assert.equal(lg.filter((x) => x.startsWith('delete:')).length, 9);
+  assert.match(await panelText(page), /다시 확인 \(2회차/);
+  ok('목록이 한 번에 3개씩만 나와도 다시 불러와 9개 모두 삭제');
+
+  // N2. 이미 없는 게시물(코드 144) → 실패·미완료가 아니라 '이미 없음'
+  lg = await run2(() => { window.__mkPosts(['5101', '5102']); window.DB.srvGone = new Set(['5101']); },
+    { posts: true }, /바로 정리 완료: 삭제\/취소 1개, 실패 0개/);
+  assert.deepEqual(lg, ['gone:5101', 'delete:5102']);
+  assert.equal(await pendCount(), 0);
+  ok('서버가 \'이미 없음(144)\'이라고 하면 실패·미완료로 남기지 않음');
+
+  // N3. 자동화 의심 차단(226) → 알림 + 일시정지 + 속도 '안전' → 재개하면 이어서
+  await run2(() => { window.__mkPosts(['5201', '5202']); window.DB.srvBlockOnce = new Set(['5201']); },
+    { posts: true }, /X 차단 응답으로 일시정지/);
+  let t = await panelText(page);
+  assert.match(t, /자동화된 동작으로 의심/);
+  assert.equal(await page.locator('#xclean-runner-host select').nth(1).inputValue(), 'safe');
+  assert.deepEqual(await dbLog(page), ['block:5201']);
+  await page.waitForTimeout(1500);
+  assert.deepEqual(await dbLog(page), ['block:5201']);
+  await btn(page, '재개').click();
+  await waitPanel(page, /바로 정리 완료: 삭제\/취소 2개, 실패 0개/, 180000);
+  ok('자동화 의심 차단(226) 시 알림·일시정지·속도 안전으로 변경, 재개 후 그 항목까지 모두 삭제');
+
+  // N4. 로그인 풀림(401) → 알림 + 일시정지 → 재개하면 이어서
+  await run2(() => { window.__mkPosts(['5301', '5302']); window.DB.srvAuthOnce = new Set(['5301']); },
+    { posts: true }, /로그인\/인증 오류로 일시정지/);
+  assert.match(await panelText(page), /다른 탭에서 X에 다시 로그인한 뒤/);
+  await btn(page, '재개').click();
+  await waitPanel(page, /바로 정리 완료: 삭제\/취소 2개, 실패 0개/, 180000);
+  ok('로그인 풀림(401) 시 알림·일시정지, 재개 후 모두 삭제');
+
+  // N5. 인터넷 끊김 → 연결될 때까지 기다렸다가 자동으로 이어서
+  lg = await run2(() => { window.__mkPosts(['5401', '5402', '5403']); window.DB.offlineOnce = new Set(['5401']); window.DB.offlineMs = 2500; },
+    { posts: true }, /바로 정리 완료: 삭제\/취소 3개, 실패 0개/);
+  t = await panelText(page);
+  assert.match(t, /인터넷 연결이 끊겼습니다/);
+  assert.match(t, /인터넷이 다시 연결되어 이어서 진행합니다/);
+  assert.ok(lg.includes('offline:5401') && lg.includes('delete:5401'));
+  ok('인터넷이 끊기면 실패로 세지 않고 기다렸다가, 연결되면 그 항목까지 모두 삭제');
+
+  // N6. 두 탭에서 동시에 실행하려 하면 막음
+  await openX(page, () => { window.__mkPosts(['5501', '5502', '5503', '5504', '5505']); window.DB.routeDelay = 1500; });
+  await inject(page);
+  await setDirect({ posts: true });
+  await startConfirmed(page, 'safe');
+  await page.waitForFunction(() => window.DB.log.length >= 1, null, { timeout: 60000 });
+  const page2 = await ctx.newPage();
+  page2.on('pageerror', (e) => pageErrors.push(e.message));
+  await page2.goto('https://x.com/home');
+  await page2.waitForFunction(() => !!window.DB);
+  await page2.evaluate(() => { const T = (id) => { window.DB.tweets[id] = { id, author: 'me', date: '2023-01-01' }; }; T('5601'); window.__mockRender(); window.__xcleanTimeScale = 0.01; });
+  await page2.addScriptTag({ content: runnerSrc });
+  await page2.waitForSelector('#xclean-runner-host', { state: 'attached' });
+  await page2.getByRole('button', { name: '시작', exact: true }).click();
+  await page2.waitForFunction(() => /다른 탭에서 실행기가 작업 중/.test(document.getElementById('xclean-runner-host').shadowRoot.textContent), null, { timeout: 10000 });
+  assert.equal(await page2.getByRole('button', { name: '되돌릴 수 없음을 이해했습니다. 시작', exact: true }).isVisible(), false);
+  assert.deepEqual(await page2.evaluate(() => window.DB.log), []);
+  await btn(page, '중지').click();
+  await waitPanel(page, /중지했습니다/, 60000);
+  assert.equal(await page.evaluate(() => localStorage.getItem('xclean:lock')), null);
+  await page2.close();
+  ok('다른 탭에서 실행 중이면 시작을 막고, 끝나면 잠금 해제');
 
   /* ---- 5. 북마크 백업 */
   await openX(page, () => {
