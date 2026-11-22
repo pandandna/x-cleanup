@@ -25,6 +25,11 @@ const waitPanel = (page, re, timeout) => page.waitForFunction((src) => {
 async function openX(page, setup, url) {
   await page.goto(url || 'https://x.com/home');
   await page.waitForFunction(() => !!window.DB);
+  await page.evaluate(() => {
+    sessionStorage.removeItem('mockKeep'); sessionStorage.removeItem('mockServer');
+    localStorage.removeItem('xclean:pending');
+    window.DB.keep = false;
+  });
   await page.evaluate(setup);
   await page.evaluate(() => window.__mockRender());
 }
@@ -57,7 +62,10 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
       if (u.searchParams.get('rl') === '1') {
         return route.fulfill({ status: 429, contentType: 'application/json', headers: { 'x-rate-limit-reset': String(Math.floor(Date.now() / 1000) + 900) }, body: '{"errors":[{"code":88,"message":"Rate limit exceeded"}]}' });
       }
-      return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+      if (u.searchParams.get('fail') === '1') {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: '{"errors":[{"code":131,"message":"Internal error"}]}' });
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '{"data":{"result":"Done"}}' });
     }
     return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: shell });
   });
@@ -79,8 +87,8 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
     window.DB.transientOnce = new Set(['103']);
   });
   await inject(page);
-  await waitPanel(page, /실행기 v3 준비됨/);
-  ok('실행기 v3 패널 표시');
+  await waitPanel(page, /실행기 v4 준비됨/);
+  ok('실행기 v4 패널 표시');
   await upload(page, mkJob('aaaaaaaaaaaa', ['900', '101', '102', '300', '400', '103'], ['501', '502', '503'], true));
   await startConfirmed(page, 'fast');
   await waitPanel(page, /완료: 삭제\/취소 8개, 이미 없음 4개, 실패 0개/, 90000);
@@ -317,6 +325,76 @@ const dbLog = (page) => page.evaluate(() => window.DB.log.slice());
   assert.equal(await alertShown(), 'none');
   assert.deepEqual(await dbLog(page), ['429:170']);
   ok('대기 중 중지하면 즉시 멈추고 알림도 사라짐');
+
+
+  /* ---- S. 화면에서는 사라졌지만 서버가 처리하지 않은 경우 (X 는 버튼을 누르면 화면에서 먼저 지움) */
+  const pendCount = () => page.evaluate(() => JSON.parse(localStorage.getItem('xclean:pending') || '[]').length);
+
+  // S1. 서버가 한 번 거부 → 화면에서는 숨겨짐 → 미완료로 기록 → 마무리 단계에서 게시물 화면을 열어 다시 처리
+  await openX(page, () => {
+    const T = (id, author, extra) => { window.DB.tweets[id] = Object.assign({ id, author }, extra || {}); };
+    T('3701', 'me', { date: '2023-02-02' }); T('3702', 'me', { date: '2023-02-01' });
+    T('3711', 'erin', { date: '2023-01-01', liked: true });
+    T('3721', 'fran', { date: '2023-01-01', rtByMe: true });
+    T('3731', 'gail'); window.DB.bookmarks = ['3731'];
+    window.DB.srvFailOnce = new Set(['3701', '3711', '3721', '3731']);
+  });
+  await inject(page);
+  await setDirect({ posts: true, reposts: true, likes: true, bms: true });
+  await startConfirmed(page, 'fast');
+  await waitPanel(page, /바로 정리 완료: 삭제\/취소 5개, 실패 0개/, 120000);
+  const logS1 = await dbLog(page);
+  for (const x of ['3701', '3711', '3721', '3731']) assert.ok(logS1.indexOf('srvfail:' + x) >= 0 && logS1.indexOf('srvfail:' + x) < logS1.findIndex((y) => y.endsWith(':' + x) && !y.startsWith('srvfail')), x);
+  assert.ok(logS1.includes('delete:3701') && logS1.includes('delete:3702') && logS1.includes('unlike:3711') && logS1.includes('unretweet:3721') && logS1.includes('unbookmark:3731'));
+  assert.equal(await page.evaluate(() => window.DB.tweets['3701'].deleted && !window.DB.tweets['3711'].liked && !window.DB.tweets['3721'].rtByMe && window.DB.bookmarks.length === 0), true);
+  assert.equal(await pendCount(), 0);
+  assert.match(await panelText(page), /미완료 4개를 게시물 화면에서 다시 처리|미완료 항목 4개를 게시물 화면에서 다시 처리/);
+  ok('서버가 거부해 화면에서만 사라진 게시물·좋아요·재게시·북마크를 성공으로 세지 않고, 게시물 화면에서 다시 처리해 실제로 반영');
+
+  // S2. 서버가 계속 거부 → 성공으로 세지 않고 실패·미완료로 남김
+  await openX(page, () => {
+    window.DB.tweets['3801'] = { id: '3801', author: 'me', date: '2023-03-02' };
+    window.DB.tweets['3802'] = { id: '3802', author: 'me', date: '2023-03-01' };
+    window.DB.srvFail = new Set(['3801']);
+  });
+  await inject(page);
+  await setDirect({ posts: true });
+  await startConfirmed(page, 'fast');
+  await waitPanel(page, /바로 정리 완료: 삭제\/취소 1개, 실패 1개/, 120000);
+  const txtS2 = await panelText(page);
+  assert.match(txtS2, /서버가 처리하지 않음 — Internal error \(코드 131\)/);
+  assert.match(txtS2, /미완료 항목 1개가 남았습니다/);
+  assert.match(txtS2, /미완료 1개: 버튼은 눌렀지만 X 서버가 처리하지 않은 항목/);
+  assert.equal(await pendCount(), 1);
+  assert.equal(await page.evaluate(() => window.DB.tweets['3801'].deleted), undefined);
+  ok('서버가 계속 거부하면 실패 1개·미완료 1개로 남기고 패널에 알림 (성공으로 세지 않음)');
+
+  // S3. 가장 나쁜 경우: 게시물 화면에서도 숨겨져 보임 → 새로고침 후 다시 붙여넣으면 미완료부터 처리
+  await openX(page, () => {
+    window.DB.keep = true; sessionStorage.setItem('mockKeep', '1');
+    window.DB.tweets['3901'] = { id: '3901', author: 'me', date: '2023-04-02' };
+    window.DB.tweets['3902'] = { id: '3902', author: 'me', date: '2023-04-01' };
+    window.DB.srvFailOnce = new Set(['3901']);
+    window.DB.statusHidden = true;
+    window.__mockSave();
+  });
+  await inject(page);
+  await setDirect({ posts: true });
+  await startConfirmed(page, 'fast');
+  await waitPanel(page, /바로 정리 완료: 삭제\/취소 1개, 실패 1개.*\n?.*미완료 항목 1개가 남았습니다/, 120000);
+  assert.equal(await pendCount(), 1);
+  assert.equal(await page.evaluate(() => window.DB.tweets['3901'].deleted), undefined);
+  ok('게시물 화면에서도 없는 것처럼 보이면 \'이미 없음\'으로 처리하지 않고 미완료로 유지');
+  await page.reload();
+  await page.waitForFunction(() => !!window.DB && window.DB.keep === true);
+  await inject(page);
+  await waitPanel(page, /미완료 1개: 버튼은 눌렀지만/);
+  await btn(page, '미완료 다시 처리').click();
+  await waitPanel(page, /미완료 다시 처리 끝: 처리 1개/, 60000);
+  assert.equal(await page.evaluate(() => window.DB.tweets['3901'].deleted), true);
+  assert.equal(await pendCount(), 0);
+  await page.evaluate(() => { sessionStorage.removeItem('mockKeep'); sessionStorage.removeItem('mockServer'); });
+  ok('새로고침 후 다시 붙여넣으면 미완료 항목을 다시 처리해 실제로 삭제');
 
   /* ---- 5. 북마크 백업 */
   await openX(page, () => {
