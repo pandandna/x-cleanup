@@ -1,4 +1,4 @@
-/*! X 정리 실행기 v3 (화면 조작 방식)
+/*! X 정리 실행기 v4 (화면 조작 방식)
  *
  *  x.com 에 로그인된 탭의 개발자 도구 콘솔에 붙여 넣어 실행합니다.
  *  - 사이트에서 만든 작업 파일(.json)을 읽어, X 화면의 버튼을 사람이 누르는 순서대로 자동으로 누릅니다.
@@ -14,7 +14,7 @@
     try { prev.destroy(); } catch (e) { /* 무시 */ }
   }
 
-  const VERSION = 3;
+  const VERSION = 4;
   const HOST_OK = /(^|\.)(x|twitter)\.com$/i.test(location.hostname);
 
   // 항목 사이 대기 시간(밀리초). 화면 이동·클릭 자체에도 1~3초가 걸립니다.
@@ -62,23 +62,92 @@
     RL.last = info;
     if (S.running && !RL.hit) RL.hit = info;
   }
+  /* 삭제/취소 요청의 서버 응답 기록 — X 는 버튼을 누르면 서버 결과와 상관없이 화면에서 먼저 지우므로,
+     성공 여부는 화면이 아니라 이 서버 응답으로 판단합니다. (요청 내용은 바꾸지 않고 응답만 읽습니다.) */
+  const MUT_RE = /\/i\/api\/graphql\/[^/?]+\/(DeleteTweet|DeleteRetweet|UnfavoriteTweet|DeleteBookmark|BookmarksAllDelete)(?:[?#]|$)/;
+  const RL_CODES = new Set([88, 344]); // 요청 한도 / 일일 한도
+  const MUT = [];
+  function noteMutation(url, body, status, text) {
+    const m = MUT_RE.exec(String(url || ''));
+    if (!m) return;
+    let id = null;
+    try {
+      const v = (JSON.parse(typeof body === 'string' ? body : '') || {}).variables || {};
+      id = String(v.tweet_id || v.source_tweet_id || '') || null;
+    } catch (e) { /* 무시 */ }
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) { /* 무시 */ }
+    const errs = json && Array.isArray(json.errors) && json.errors.length ? json.errors : null;
+    const ok = status >= 200 && status < 300 && !!json && !errs;
+    const code = errs && errs[0] ? errs[0].code : null;
+    const msg = errs && errs[0] ? String(errs[0].message || '').slice(0, 120) : (status ? 'HTTP ' + status : '응답 없음');
+    MUT.push({ op: m[1], id, ok, status, code, msg, at: Date.now() });
+    if (MUT.length > 300) MUT.shift();
+    if (!ok && (status === 429 || RL_CODES.has(code))) {
+      const info = { at: Date.now(), url: String(url).split('?')[0], resetAt: null };
+      RL.last = info;
+      if (S.running && !RL.hit) RL.hit = info;
+    }
+  }
   const XP = XMLHttpRequest.prototype;
-  const NATIVE = { open: XP.open, send: XP.send };
+  const NATIVE = { open: XP.open, send: XP.send, fetch: window.fetch };
   XP.open = function (method, url) {
-    try { this.__xcUrl = String(url); } catch (e) { /* 무시 */ }
+    try { this.__xcUrl = String(url); this.__xcMethod = String(method || '').toUpperCase(); } catch (e) { /* 무시 */ }
     return NATIVE.open.apply(this, arguments);
   };
-  XP.send = function () {
+  XP.send = function (body) {
     try {
+      const isMut = this.__xcMethod === 'POST' && MUT_RE.test(this.__xcUrl || '');
       this.addEventListener('loadend', function () {
-        if (this.status !== 429) return;
-        let reset = null;
-        try { reset = Number(this.getResponseHeader('x-rate-limit-reset')) || null; } catch (e) { /* 무시 */ }
-        noteRateLimit(this.__xcUrl || this.responseURL, reset);
+        if (this.status === 429) {
+          let reset = null;
+          try { reset = Number(this.getResponseHeader('x-rate-limit-reset')) || null; } catch (e) { /* 무시 */ }
+          noteRateLimit(this.__xcUrl || this.responseURL, reset);
+        }
+        if (isMut) {
+          let text = '';
+          try { text = (!this.responseType || this.responseType === 'text') ? this.responseText : JSON.stringify(this.response); } catch (e) { text = ''; }
+          noteMutation(this.__xcUrl, body, this.status, text);
+        }
       });
     } catch (e) { /* 무시 */ }
     return NATIVE.send.apply(this, arguments);
   };
+  if (typeof NATIVE.fetch === 'function') {
+    window.fetch = function (input, init) {
+      const p = NATIVE.fetch.apply(this, arguments);
+      try {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+        if (method === 'POST' && MUT_RE.test(url)) {
+          const body = init && typeof init.body === 'string' ? init.body : '';
+          p.then((res) => res.clone().text().then((t) => noteMutation(url, body, res.status, t)))
+            .catch(() => noteMutation(url, body, 0, ''));
+        }
+      } catch (e) { /* 무시 */ }
+      return p;
+    };
+  }
+
+  // 버튼을 누른 뒤(since 이후) 해당 작업의 서버 응답을 기다립니다.
+  async function awaitMut(ops, id, since, timeout) {
+    const end = Date.now() + (timeout || 15000);
+    for (;;) {
+      const hit = MUT.find((m) => m.at >= since && ops.indexOf(m.op) >= 0 && (!id || !m.id || m.id === id));
+      if (hit) return hit;
+      if (S.stop || Date.now() > end) return null;
+      await new Promise((r) => setTimeout(r, 120));
+    }
+  }
+  const PEND_OP = { DeleteTweet: 'delete', DeleteRetweet: 'unretweet', UnfavoriteTweet: 'unlike', DeleteBookmark: 'unbookmark' };
+  // 서버 응답 → 결과. 버튼을 이미 눌렀으므로(화면에서는 사라졌을 수 있음) 실패하면 미완료 목록에 올릴 정보(pend)를 붙입니다.
+  function mutResult(m, opName, id, what) {
+    const pend = { op: PEND_OP[opName], id };
+    if (!m) return { kind: 'fail', msg: what + ': 서버 응답을 확인하지 못했습니다', pend };
+    if (m.ok) return { kind: 'ok', pend };
+    if (m.status === 429 || RL_CODES.has(m.code)) return { kind: 'fail', msg: what + ': 요청 한도 초과(' + (m.code || m.status) + ')', rl: true, pend };
+    return { kind: 'fail', msg: what + ': 서버가 처리하지 않음 — ' + m.msg + (m.code ? ' (코드 ' + m.code + ')' : ''), pend };
+  }
   let perfObs = null;
   try {
     perfObs = new PerformanceObserver((list) => {
@@ -233,7 +302,8 @@
   /* ----------------------------------------------------------- 항목 처리 */
 
   // ⋯ 메뉴 → 삭제하기 → 확인. 삭제 메뉴가 없으면 {kind:'nomenu'}
-  async function menuDelete(art, isGone) {
+  async function menuDelete(art, isGone, id) {
+    id = id || articleId(art);
     const caret = art.querySelector('[data-testid="caret"]');
     if (!caret) return { kind: 'nomenu' };
     press(caret);
@@ -248,33 +318,44 @@
       await waitFor(() => !document.querySelector('[data-testid="confirmationSheetConfirm"]') || null, 4000);
       return { kind: 'ok', msg: '시험: 삭제 확인 창까지 확인' };
     }
+    const t0 = Date.now();
     press(ok);
-    const done = await waitFor(() => isGone() || null, 10000);
-    return done ? { kind: 'ok' } : { kind: 'fail', msg: '삭제 후에도 게시물이 남아 있습니다' };
+    const r = mutResult(await awaitMut(['DeleteTweet'], id, t0), 'DeleteTweet', id, '삭제');
+    if (r.kind === 'ok') await waitFor(() => isGone() || null, 3000); // 화면 정리 대기(판정에는 쓰지 않음)
+    return r;
   }
 
-  async function undoRetweet(art) {
+  async function undoRetweet(art, id) {
+    id = id || articleId(art);
     const un = art.querySelector('[data-testid="unretweet"]');
     if (!un) return { kind: 'gone', msg: '재게시 상태가 아님' };
     if (S.dry) return { kind: 'ok', msg: '시험: 재게시 취소 버튼 확인' };
     press(un);
     const c = await waitFor(() => document.querySelector('[data-testid="unretweetConfirm"]'), 5000);
     if (!c) { closeMenus(); return { kind: 'fail', msg: '재게시 취소 메뉴가 나타나지 않았습니다' }; }
+    const t0 = Date.now();
     press(c);
-    const done = await waitFor(() => art.querySelector('[data-testid="retweet"]') || !art.isConnected, 8000);
-    return done ? { kind: 'ok' } : { kind: 'fail', msg: '재게시 취소가 확인되지 않았습니다' };
+    return mutResult(await awaitMut(['DeleteRetweet'], id, t0), 'DeleteRetweet', id, '재게시 취소');
   }
 
-  async function undoLike(art) {
+  async function undoLike(art, id) {
+    id = id || articleId(art);
     const un = art.querySelector('[data-testid="unlike"]');
     if (!un) {
       if (art.querySelector('[data-testid="like"]')) return { kind: 'gone', msg: '이미 좋아요가 취소됨' };
       return { kind: 'fail', msg: '좋아요 버튼을 찾지 못했습니다' };
     }
     if (S.dry) return { kind: 'ok', msg: '시험: 좋아요 취소 버튼 확인' };
+    const t0 = Date.now();
     press(un);
-    const done = await waitFor(() => art.querySelector('[data-testid="like"]') || !art.isConnected, 8000);
-    return done ? { kind: 'ok' } : { kind: 'fail', msg: '좋아요 취소가 확인되지 않았습니다' };
+    return mutResult(await awaitMut(['UnfavoriteTweet'], id, t0), 'UnfavoriteTweet', id, '좋아요 취소');
+  }
+
+  async function unbookmarkOne(btnEl, id) {
+    if (S.dry) return { kind: 'ok', msg: '시험: 북마크 해제 버튼 확인' };
+    const t0 = Date.now();
+    press(btnEl);
+    return mutResult(await awaitMut(['DeleteBookmark', 'BookmarksAllDelete'], id, t0), 'DeleteBookmark', id, '북마크 해제');
   }
 
   // 반환: {kind:'ok'|'gone'|'fail'|'transient', msg}
@@ -284,19 +365,19 @@
     const art = st.el;
     const mine = isMine(art);
     if (mine !== false) {
-      const r = await menuDelete(art, () => !art.isConnected || !focalArticle(id));
+      const r = await menuDelete(art, () => !art.isConnected || !focalArticle(id), articleId(art) || id);
       if (r.kind !== 'nomenu') return r;
       if (mine === true) return { kind: 'fail', msg: '메뉴에서 \'삭제하기\'를 찾지 못했습니다' };
     }
     // 내 게시물이 아니면 재게시(리트윗) 기록입니다 → 재게시 취소
-    if (art.querySelector('[data-testid="unretweet"]')) return undoRetweet(art);
+    if (art.querySelector('[data-testid="unretweet"]')) return undoRetweet(art, articleId(art));
     return { kind: 'gone', msg: '내 게시물이 아니거나 이미 재게시를 취소함' };
   }
 
   async function unlikeTweet(id) {
     const st = await openStatus(id);
     if (!st || st.kind !== 'article') return st || { kind: 'fail', msg: '중지됨' };
-    return undoLike(st.el);
+    return undoLike(st.el, articleId(st.el) || id);
   }
 
   /* ------------------------------------------- 바로 정리 (작업 파일 없이) */
@@ -341,7 +422,7 @@
     const head = (a.innerText || '').slice(0, 400);
     return REPLY_LABEL_RE.test(head) || hasThreadLineAbove(a);
   }
-  const deleteHere = (art, id) => menuDelete(art, () => !art.isConnected || !onTimeline(id))
+  const deleteHere = (art, id) => menuDelete(art, () => !art.isConnected || !onTimeline(id), id)
     .then((r) => (r.kind === 'nomenu' ? { kind: 'fail', msg: '메뉴에서 \'삭제하기\'를 찾지 못했습니다' } : r));
 
   // 프로필 '게시물'·'답글' 탭: 체크한 종류(게시물/답글)의 내 글만 삭제합니다. 재게시는 '재게시' 탭에서 따로 처리합니다.
@@ -353,11 +434,11 @@
   // 프로필 '재게시' 탭: 재게시 취소만 합니다(내 글을 내가 재게시한 경우에도 원글은 지우지 않음).
   function pickRepost(a) {
     if (!dateOk(a) || !a.querySelector('[data-testid="unretweet"]')) return null;
-    return (art) => undoRetweet(art);
+    return (art, id) => undoRetweet(art, id);
   }
   function pickLike(a) {
     if (!dateOk(a) || !a.querySelector('[data-testid="unlike"]')) return null;
-    return (art) => undoLike(art);
+    return (art, id) => undoLike(art, id);
   }
 
   // 목록 화면을 위에서부터 훑으며 조건에 맞는 항목을 하나씩 처리합니다.
@@ -419,11 +500,15 @@
       RL.hit = null;
       try { r = await act(target, tid); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
       if (S.stop) break;
-      if (RL.hit && r.kind !== 'ok') { seen.delete(tid); await rlWait(); reload = true; continue; }
+      if ((RL.hit || r.rl) && r.kind !== 'ok') {
+        if (r.pend) addPending(r.pend, r.msg); // 화면에서는 이미 사라졌을 수 있으므로 기록해 두고 나중에 다시 처리
+        seen.delete(tid); await rlWait(); reload = true; continue;
+      }
       RL.hit = null;
-      if (r.kind === 'ok') { S.stats.ok++; acted++; consec = []; transient = 0; }
+      if (r.kind === 'ok') { S.stats.ok++; acted++; consec = []; transient = 0; if (r.pend) removePending(r.pend); }
       else if (r.kind === 'gone') { S.stats.gone++; consec = []; }
       else {
+        if (r.pend) addPending(r.pend, r.msg);
         S.stats.fail++;
         S.failed.push({ stage: st.key, id: tid, message: r.msg });
         consec.push(tid);
@@ -460,6 +545,7 @@
     if (document.hidden) log('주의: 이 탭이 화면에 보이지 않으면 브라우저가 속도를 크게 늦춥니다. 이 탭을 띄워 두세요.');
     if (S.dry) log('시험 실행: 단계마다 ' + DRY_MAX + '개까지만 확인하고, 실제로 지우지 않습니다.');
     if (S.direct.before) log('기준: ' + S.direct.before.toLocaleDateString('ko-KR') + ' 이전 게시물만');
+    await runPending('시작 전');
     const d = S.direct;
     if (d.posts && !S.stop) await sweep({ key: 'tweets', label: '게시물 탭', path: me, pick: pickOwn });
     // '게시물' 탭에는 오래된 게시물이 안 나오는 경우가 있어, '답글' 탭(게시물+답글이 함께 나옴)도 훑습니다.
@@ -471,11 +557,121 @@
     }
     if (d.likes && !S.stop) await sweep({ key: 'likes', label: '좋아요', path: '/i/history/likes', pick: pickLike });
     if (d.bookmarks && !S.stop) await runBookmarksAll();
+    await runPending('마무리');
     const r = S.stats;
     S.lastDirect = (S.dry ? '시험 결과: 처리 가능 ' : '결과: 삭제/취소 ') + r.ok + '개, 실패 ' + r.fail + '개';
-    if (S.stop) finish('중지했습니다. 다시 시작하면 남은 항목을 처음부터 다시 훑습니다.');
+    if (S.stop) finish('중지했습니다. 다시 시작하면 남은 항목을 처음부터 다시 훑습니다.' + pendingNotice());
     else if (S.dry) finish('시험 실행 완료: 처리 가능 ' + r.ok + '개, 실패 ' + r.fail + '개 (실제로 지운 것은 없습니다)');
-    else finish('바로 정리 완료: 삭제/취소 ' + r.ok + '개, 실패 ' + r.fail + '개');
+    else finish('바로 정리 완료: 삭제/취소 ' + r.ok + '개, 실패 ' + r.fail + '개' + pendingNotice());
+  }
+
+  /* ---------------------------------------------- 미완료 목록 (서버가 처리하지 않은 항목) */
+  // 버튼은 눌렀지만 서버가 처리하지 않은 항목. X 화면에서는 사라져 보일 수 있으므로 따로 기록해 두었다가
+  // 게시물 화면(서버에서 새로 불러옴)을 열어 다시 처리합니다. 브라우저에 저장되므로 새로고침 후에도 이어집니다.
+  const PEND_KEY = 'xclean:pending';
+  const PAGE_EPOCH = Math.round(performance.timeOrigin || Date.now()); // 이 페이지가 열린 시각(새로고침하면 바뀜)
+  const PEND_LABEL = { delete: '삭제', unretweet: '재게시 취소', unlike: '좋아요 취소', unbookmark: '북마크 해제' };
+  function loadPendingAll() {
+    try { const a = JSON.parse(localStorage.getItem(PEND_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+  }
+  function savePendingAll(list) {
+    try { localStorage.setItem(PEND_KEY, JSON.stringify(list.slice(-5000))); } catch (e) { /* 무시 */ }
+  }
+  const myKey = () => myProfilePath() || '?';
+  const loadPending = () => loadPendingAll().filter((p) => p.me === myKey());
+  function addPending(pend, msg) {
+    if (!pend || !pend.op || !pend.id || S.dry) return;
+    const all = loadPendingAll();
+    const me = myKey();
+    const cur = all.find((p) => p.me === me && p.op === pend.op && p.id === pend.id);
+    if (cur) { cur.msg = msg; cur.epoch = PAGE_EPOCH; cur.at = Date.now(); }
+    else all.push({ me, op: pend.op, id: pend.id, msg, epoch: PAGE_EPOCH, at: Date.now() });
+    savePendingAll(all);
+  }
+  function removePending(pend) {
+    if (!pend || !pend.id) return;
+    const me = myKey();
+    const all = loadPendingAll();
+    const next = all.filter((p) => !(p.me === me && p.id === pend.id && (!pend.op || p.op === pend.op)));
+    if (next.length !== all.length) savePendingAll(next);
+  }
+  function clearPending() {
+    const me = myKey();
+    savePendingAll(loadPendingAll().filter((p) => p.me !== me));
+  }
+  // 이번 실행에서 실패로 기록했던 항목이 나중에 처리되면 실패 기록에서 뺍니다.
+  function unfail(id) {
+    const i = S.failed.findIndex((f) => f.id === id);
+    if (i >= 0) { S.failed.splice(i, 1); S.stats.fail = Math.max(0, S.stats.fail - 1); }
+  }
+
+  async function retryPendingItem(p) {
+    const st = await openStatus(p.id);
+    if (!st) return { kind: 'fail', msg: '중지됨' };
+    // 새로고침 전 같은 화면에서 실패한 항목은, 화면에서 '없음'으로 보여도 실제로는 남아 있을 수 있습니다.
+    const fresh = p.epoch !== PAGE_EPOCH;
+    const unsure = { kind: 'keep', msg: p.msg || '' };
+    if (st.kind === 'gone') return fresh ? { kind: 'gone' } : unsure;
+    if (st.kind !== 'article') return st;
+    const art = st.el;
+    const aid = articleId(art) || p.id;
+    if (p.op === 'delete') {
+      if (isMine(art) === false) return { kind: 'gone', msg: '내 게시물이 아님' };
+      const r = await menuDelete(art, () => !art.isConnected || !focalArticle(p.id), aid);
+      return r.kind === 'nomenu' ? { kind: 'fail', msg: '메뉴에서 \'삭제하기\'를 찾지 못했습니다' } : r;
+    }
+    if (p.op === 'unretweet') {
+      if (art.querySelector('[data-testid="unretweet"]')) return undoRetweet(art, aid);
+      return fresh ? { kind: 'gone' } : unsure;
+    }
+    if (p.op === 'unlike') {
+      if (art.querySelector('[data-testid="unlike"]')) return undoLike(art, aid);
+      return fresh ? { kind: 'gone' } : unsure;
+    }
+    if (p.op === 'unbookmark') {
+      const b = art.querySelector('[data-testid="removeBookmark"]');
+      if (b) return unbookmarkOne(b, aid);
+      return fresh ? { kind: 'gone' } : unsure;
+    }
+    return { kind: 'gone' };
+  }
+
+  async function runPending(label) {
+    if (S.dry || S.stop) return;
+    const list = loadPending();
+    if (!list.length) return;
+    log(label + ': 서버가 처리하지 않은 미완료 항목 ' + list.length + '개를 게시물 화면에서 다시 처리합니다.');
+    let fixed = 0;
+    for (const p of list) {
+      if (S.stop) return;
+      let tries = 0;
+      for (;;) {
+        if (S.stop) return;
+        if (S.paused) { await waitResume(); continue; }
+        S.note = '미완료 다시 처리(' + (PEND_LABEL[p.op] || p.op) + '): ' + p.id;
+        render();
+        RL.hit = null;
+        let r;
+        try { r = await retryPendingItem(p); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
+        if (S.stop) return;
+        if (r.kind !== 'ok' && (RL.hit || r.rl) && tries < 4) { tries++; await rlWait(); continue; }
+        if (r.kind === 'transient' && tries < 3) { tries++; await transientWait(); continue; }
+        if (r.kind === 'ok') { removePending(p); unfail(p.id); S.stats.ok++; fixed++; }
+        else if (r.kind === 'gone') { removePending(p); unfail(p.id); S.stats.gone++; }
+        else if (r.msg && r.kind !== 'keep') addPending(p, r.msg);
+        break;
+      }
+      render();
+      await sleep(randDelay());
+    }
+    S.note = '';
+    const left = loadPending().length;
+    log(label + ': 미완료 ' + fixed + '개 처리' + (left ? ', ' + left + '개 남음' : ', 남은 항목 없음'));
+  }
+
+  function pendingNotice() {
+    const n = loadPending().length;
+    return n ? '\n서버가 처리하지 않은 미완료 항목 ' + n + '개가 남았습니다(X 화면에서는 사라져 보일 수 있음). 페이지를 새로고침(F5)한 뒤 실행기를 다시 붙여 넣고 시작하면 이 항목부터 다시 처리합니다.' : '';
   }
 
   /* ------------------------------------------------------------- 진행/저장 */
@@ -614,9 +810,14 @@
       RL.hit = null;
       try { r = await st.fn(id); } catch (e) { r = { kind: 'fail', msg: '스크립트 오류: ' + (e && e.message) }; }
       if (S.stop) return;
-      if (RL.hit && (!r || r.kind !== 'ok')) { await rlWait(); continue; } // 같은 항목을 재개 후 다시 시도
+      if ((RL.hit || (r && r.rl)) && (!r || r.kind !== 'ok')) { // 같은 항목을 기다렸다가 다시 시도
+        if (r && r.pend) addPending(r.pend, r.msg);
+        await rlWait(); continue;
+      }
       RL.hit = null;
       if (!r) continue;
+      if (r.kind === 'ok' && r.pend) removePending(r.pend);
+      if (r.kind === 'fail' && r.pend) addPending(r.pend, r.msg);
 
       if (r.kind === 'transient') {
         if (S.transient >= TRANSIENT_LIMIT) {
@@ -689,7 +890,7 @@
       render();
       return;
     }
-    let removed = 0; let idle = 0;
+    let removed = 0; let idle = 0; let bmFails = 0;
     while (!S.stop) {
       if (S.paused) { await waitResume(); continue; }
       if (!BM_PATH_RE.test(location.pathname)) { await openBookmarks(); await tick(800); }
@@ -704,9 +905,23 @@
       }
       idle = 0;
       RL.hit = null;
-      press(b);
-      await waitFor(() => !b.isConnected || b.getAttribute('data-testid') !== 'removeBookmark' || null, 5000);
-      if (RL.hit && b.isConnected && b.getAttribute('data-testid') === 'removeBookmark') { await rlWait(); continue; }
+      const row = b.closest('article');
+      const bid = row ? articleId(row) : null;
+      const r = await unbookmarkOne(b, bid);
+      if (S.stop) break;
+      if (r.kind !== 'ok') {
+        if (r.pend) addPending(r.pend, r.msg);
+        if (RL.hit || r.rl) { await rlWait(); continue; }
+        S.stats.fail++;
+        S.failed.push({ stage: 'bookmarks', id: bid || '-', message: r.msg });
+        log('실패 ' + (bid || '') + ': ' + r.msg);
+        bmFails++;
+        if (bmFails >= FAIL_LIMIT) { bmFails = 0; pauseWith('북마크 해제가 연속 ' + FAIL_LIMIT + '회 실패했습니다 (마지막: ' + r.msg + '). 확인 후 \'재개\'를 눌러 주세요.'); }
+        await sleep(randDelay());
+        continue;
+      }
+      bmFails = 0;
+      if (r.pend) removePending(r.pend);
       RL.hit = null;
       removed++;
       S.note = '북마크 ' + removed + '개 해제';
@@ -741,11 +956,13 @@
       return;
     }
     if (document.hidden) log('주의: 이 탭이 화면에 보이지 않으면 브라우저가 속도를 크게 늦춥니다. 이 탭을 띄워 두세요.');
+    await runPending('시작 전');
     for (const st of stagesFor(job)) {
       if (S.stop) break;
       await runList(st);
     }
     if (!S.stop && S.include.bookmarks && job.bookmarksAll && S.progress.bookmarks < 1) await runBookmarksAll();
+    await runPending('마무리');
     if (S.dry) {
       const r = S.stats;
       if (S.stop) finish('시험 실행을 중지했습니다.');
@@ -753,7 +970,24 @@
       return;
     }
     if (S.stop) finish('중지했습니다. 같은 작업 파일을 다시 선택하면 이어서 진행할 수 있습니다.');
-    else finish('완료: 삭제/취소 ' + S.stats.ok + '개, 이미 없음 ' + S.stats.gone + '개, 실패 ' + S.stats.fail + '개');
+    else finish('완료: 삭제/취소 ' + S.stats.ok + '개, 이미 없음 ' + S.stats.gone + '개, 실패 ' + S.stats.fail + '개' + pendingNotice());
+  }
+
+  async function startPendingOnly() {
+    if (S.running || !loadPending().length) return;
+    RL.hit = null; S.alert = '';
+    S.mode = 'direct';
+    S.running = true; S.paused = false; S.stop = false; S.confirming = false;
+    S.stash = { progress: S.progress, stats: S.stats, failed: S.failed };
+    S.progress = { tweets: 0, likes: 0, bookmarks: 0 };
+    S.stats = { ok: 0, gone: 0, fail: 0 };
+    S.failed = [];
+    const wasDry = S.dry; S.dry = false;
+    render();
+    await runPending('미완료 다시 처리');
+    S.dry = wasDry;
+    const r = S.stats;
+    finish((S.stop ? '중지했습니다.' : '미완료 다시 처리 끝: 처리 ' + r.ok + '개, 이미 없음 ' + r.gone + '개') + pendingNotice());
   }
 
   function finish(msg) {
@@ -996,6 +1230,8 @@
     body.appendChild(ui.barWrap);
     ui.progressText = el('div', { color: '#e7e9ea' });
     body.appendChild(ui.progressText);
+    ui.pendLine = el('div', { color: '#ffd166', display: 'none' });
+    body.appendChild(ui.pendLine);
 
     ui.log = el('div', {
       maxHeight: '120px', overflowY: 'auto', background: '#0a0e12', border: '1px solid #26323c', borderRadius: '6px',
@@ -1009,7 +1245,10 @@
       download('xclean-failed-' + stamp() + '.json', 'application/json', JSON.stringify(S.src === 'direct' ? (S.directFailed || []) : S.failed, null, 2));
     }, 'neutral');
     ui.resetProg = btn('진행 기록 지우기', () => { if (!S.running) { clearProgress(); log('진행 기록을 지웠습니다.'); render(); } }, 'neutral');
+    ui.pendRun = btn('미완료 다시 처리', () => startPendingOnly(), 'primary');
+    ui.pendClear = btn('미완료 목록 지우기', () => { if (!S.running) { clearPending(); log('미완료 목록을 지웠습니다.'); render(); } }, 'neutral');
     ui.extra.appendChild(ui.bmBackup); ui.extra.appendChild(ui.failSave); ui.extra.appendChild(ui.resetProg);
+    ui.extra.appendChild(ui.pendRun); ui.extra.appendChild(ui.pendClear);
     body.appendChild(ui.extra);
 
     root.appendChild(panel);
@@ -1157,6 +1396,11 @@
       ui.confirmText.textContent = parts.join('\n') + '\n\n삭제는 되돌릴 수 없습니다. 백업을 받으셨는지 확인해 주세요.\n실행 중에는 이 탭을 새로고침하거나 닫지 말고, 화면에 띄워 두세요.\n(실행기가 X 화면을 자동으로 이동하며 버튼을 누릅니다.)';
     }
     setEnabled(ui.bmBackup, HOST_OK && !busy);
+    const pn = HOST_OK ? loadPending().length : 0;
+    show(ui.pendLine, pn > 0);
+    ui.pendLine.textContent = '미완료 ' + fmt(pn) + '개: 버튼은 눌렀지만 X 서버가 처리하지 않은 항목입니다. 시작하면 먼저 다시 처리합니다.';
+    show(ui.pendRun, pn > 0 && !busy);
+    show(ui.pendClear, pn > 0 && !busy);
     show(ui.failSave, S.src === 'direct' ? !!(S.directFailed && S.directFailed.length) : S.failed.length > 0);
     show(ui.resetProg, !direct && loaded && !busy && (done > 0 || S.stats.fail > 0));
   }
@@ -1166,15 +1410,17 @@
   function destroy() {
     S.stop = true; S.paused = false;
     XP.open = NATIVE.open; XP.send = NATIVE.send;
+    if (NATIVE.fetch) window.fetch = NATIVE.fetch;
     if (perfObs) { try { perfObs.disconnect(); } catch (e) { /* 무시 */ } }
     if (host && host.parentNode) host.parentNode.removeChild(host);
     host = null;
     if (window.__xcleanRunner && window.__xcleanRunner.version === VERSION) delete window.__xcleanRunner;
   }
-  window.__xcleanRunner = { version: VERSION, destroy };
+  window.__xcleanRunner = { version: VERSION, destroy, mutations: () => MUT.map((m) => Object.assign({}, m)) };
 
   buildUi();
   if (!HOST_OK) log('이 탭(' + location.hostname + ')에서는 실행할 수 없습니다.');
+  else if (loadPending().length) log('지난 실행에서 서버가 처리하지 않은 미완료 항목 ' + loadPending().length + '개가 있습니다. 시작하면 먼저 다시 처리합니다.');
   render();
   log('실행기 v' + VERSION + ' 준비됨 (화면 조작 방식). 방식을 고르고, 먼저 \'시험 실행\'으로 확인해 보세요.');
 })();
